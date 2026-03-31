@@ -1,0 +1,20 @@
+[Unit]
+Description=Pi Experiment Service - Self-Adaptive Digital Twin Experiments
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/digitaltwin/demo-board-hardware-code
+Environment="PATH=/home/pi/digitaltwin/demo-board-hardware-code/.venv/bin"
+Environment="PI_SERVICE_PORT=8001"
+Environment="PI_SERVICE_HOST=0.0.0.0"
+ExecStart=/home/pi/digitaltwin/demo-board-hardware-code/.venv/bin/python3 pi_experiment_service.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/pi/digitaltwin/demo-board-hardware-code/logs/pi_experiment_service.log
+StandardError=append:/home/pi/digitaltwin/demo-board-hardware-code/logs/pi_experiment_service.log
+
+[Install]
+WantedBy=multi-user.target

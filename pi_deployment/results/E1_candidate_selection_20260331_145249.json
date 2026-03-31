@@ -1,0 +1,35 @@
+{
+  "experiment": "E1_candidate_selection",
+  "timestamp": "2026-03-31T14:52:43.876405",
+  "node_id": 1,
+  "trials": [
+    {
+      "trial": 1,
+      "success": false,
+      "reason": "no_decision"
+    },
+    {
+      "trial": 2,
+      "decision": "fan_0pct",
+      "fan_speed": 0.0,
+      "effectiveness": 0.9,
+      "cost": 1.0,
+      "success": true
+    },
+    {
+      "trial": 3,
+      "decision": "fan_0pct",
+      "fan_speed": 0.0,
+      "effectiveness": 0.9,
+      "cost": 1.0,
+      "success": true
+    }
+  ],
+  "summary": {
+    "total_trials": 3,
+    "successful": 2,
+    "success_rate": 0.6666666666666666
+  },
+  "duration_seconds": 6.027199029922485,
+  "backend_available": false
+}
