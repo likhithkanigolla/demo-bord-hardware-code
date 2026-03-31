@@ -24,7 +24,7 @@ mkdir -p "${SCRIPT_DIR}/logs"
 
 # Choose Python interpreter (avoid 3.13 due to pydantic-core build issues)
 PYTHON_BIN=""
-for candidate in python3.11 python3.10 python3.9 python3; do
+for candidate in python3.12 python3.11 python3.10 python3.9 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
         PYTHON_BIN="$candidate"
         break
@@ -32,14 +32,14 @@ for candidate in python3.11 python3.10 python3.9 python3; do
 done
 
 if [ -z "$PYTHON_BIN" ]; then
-    echo "ERROR: No Python 3 interpreter found. Install python3.11 and python3.11-venv."
+    echo "ERROR: No Python 3 interpreter found. Install python3.12 (or 3.11/3.10/3.9) and the matching -venv package."
     exit 1
 fi
 
 PY_VERSION=$($PYTHON_BIN -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 if [ "$PY_VERSION" = "3.13" ]; then
     echo "ERROR: Python 3.13 detected. pydantic-core build fails on 3.13."
-    echo "Install python3.11 and python3.11-venv, then rerun."
+    echo "Install python3.12 (or 3.11/3.10/3.9) and the matching -venv package, then rerun."
     exit 1
 fi
 
