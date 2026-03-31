@@ -115,13 +115,24 @@ esp_queue = []
 last_esp_send = 0
 
 
-def send_esp_command(cmd):
+def _normalize_esp_url(target_url):
+    if not target_url:
+        return ESP_URL
+    if target_url.startswith("http://") or target_url.startswith("https://"):
+        return target_url
+    return f"http://{target_url}"
+
+
+def send_esp_command(cmd, target_url=None):
     try:
+        url = _normalize_esp_url(target_url)
         payload = {"cmd": cmd}
-        r = requests.post(ESP_URL, json=payload, timeout=2)
+        r = requests.post(url, json=payload, timeout=2)
         print("ESP:", cmd, "|", r.status_code)
+        return r.ok, f"HTTP {r.status_code}: {r.text[:200]}"
     except Exception as e:
         print("ESP Error:", e)
+        return False, str(e)
 
 
 # ================= SENSOR =================
@@ -218,14 +229,38 @@ def poll_commands():
         data = r.json()
 
         for cmd in data.get("commands", []):
+            cmd_type = cmd.get("command_type")
+            payload = cmd.get("command_payload") or {}
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = {}
+
+            status = "executed"
+            message = "OK"
+
+            if cmd_type == "ESP_COMMAND":
+                cmd_list = payload.get("cmd")
+                target_url = payload.get("target_url")
+                if not cmd_list:
+                    status = "failed"
+                    message = "Missing cmd payload"
+                else:
+                    ok, resp_msg = send_esp_command(cmd_list, target_url)
+                    status = "executed" if ok else "failed"
+                    message = resp_msg
+            else:
+                message = f"Skipped unsupported command: {cmd_type}"
+
             requests.post(
                 f"{API_BASE}/commands/{cmd['id']}/ack",
-                json={"status": "executed", "response_message": "OK"},
+                json={"status": status, "response_message": message},
                 timeout=5
             )
-            print("ACK:", cmd["id"])
-    except:
-        pass
+            print("ACK:", cmd["id"], status)
+    except Exception as exc:
+        print("Command poll error:", exc)
 
 
 # ================= MAIN =================
