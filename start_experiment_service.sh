@@ -22,10 +22,37 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Pi Experiment Service..."
 # Create logs directory
 mkdir -p "${SCRIPT_DIR}/logs"
 
+# Choose Python interpreter (avoid 3.13 due to pydantic-core build issues)
+PYTHON_BIN=""
+for candidate in python3.11 python3.10 python3.9 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        PYTHON_BIN="$candidate"
+        break
+    fi
+done
+
+if [ -z "$PYTHON_BIN" ]; then
+    echo "ERROR: No Python 3 interpreter found. Install python3.11 and python3.11-venv."
+    exit 1
+fi
+
+PY_VERSION=$($PYTHON_BIN -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+if [ "$PY_VERSION" = "3.13" ]; then
+    echo "ERROR: Python 3.13 detected. pydantic-core build fails on 3.13."
+    echo "Install python3.11 and python3.11-venv, then rerun."
+    exit 1
+fi
+
 # Activate virtual environment
-if [ ! -d "$VENV_PATH" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv "$VENV_PATH"
+if [ -d "$VENV_PATH" ]; then
+    VENV_VERSION=$($VENV_PATH/bin/python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    if [ "$VENV_VERSION" = "3.13" ]; then
+        echo "ERROR: Existing venv uses Python 3.13. Remove $VENV_PATH and rerun to recreate with $PYTHON_BIN."
+        exit 1
+    fi
+else
+    echo "Creating virtual environment with $PYTHON_BIN..."
+    "$PYTHON_BIN" -m venv "$VENV_PATH"
 fi
 
 source "$VENV_PATH/bin/activate"
@@ -33,7 +60,7 @@ source "$VENV_PATH/bin/activate"
 # Install dependencies if requirements exist
 if [ -f "requirements.txt" ]; then
     echo "Installing/updating dependencies..."
-    pip install -q -r requirements.txt
+    pip install -r requirements.txt
 fi
 
 # ============ START SERVICE ==========
