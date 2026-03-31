@@ -4,3 +4,7 @@ adafruit_circuitpython_si7021==4.1.17
 adafruit_circuitpython_veml7700==2.2.0
 Requests==2.33.0
 rpi_gpio==0.7.1
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.5.0
+python-dotenv==1.0.0

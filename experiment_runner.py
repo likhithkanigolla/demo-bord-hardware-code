@@ -190,6 +190,144 @@ class E1CandidateSelectionExperiment:
         logger.info(f"Results saved to {result_file}")
 
 
+class E2AccuracyImprovementExperiment:
+    """
+    E2: Does DT accuracy improve over time with feedback?
+    
+    - Start with baseline predictions
+    - Run multiple cycles with feedback
+    - Verify model improves
+    """
+    
+    def __init__(self, trials: int = 3):
+        self.trials = trials
+        self.results = {
+            'timestamp': datetime.now().isoformat(),
+            'experiment': 'E2',
+            'trials': [],
+            'summary': {},
+        }
+    
+    def run(self):
+        logger.info("="*60)
+        logger.info("[E2] Accuracy Improvement Experiment")
+        logger.info("="*60)
+        logger.info("E2 experiment not yet fully implemented")
+        self.results['summary'] = {'status': 'not_implemented', 'trial_count': self.trials}
+        return self.results
+    
+    def save_results(self):
+        """Save results to JSON"""
+        result_file = RESULTS_DIR / "E2_results.json"
+        result_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(result_file, 'w') as f:
+            json.dump(self.results, f, indent=2)
+        logger.info(f"Results saved to {result_file}")
+
+
+class E3LearningCapabilityExperiment:
+    """
+    E3: Can DT learn from different fault patterns?
+    
+    - Present diverse fault scenarios
+    - Verify learning across different types
+    """
+    
+    def __init__(self, trials: int = 3):
+        self.trials = trials
+        self.results = {
+            'timestamp': datetime.now().isoformat(),
+            'experiment': 'E3',
+            'trials': [],
+            'summary': {},
+        }
+    
+    def run(self):
+        logger.info("="*60)
+        logger.info("[E3] Learning Capability Experiment")
+        logger.info("="*60)
+        logger.info("E3 experiment not yet fully implemented")
+        self.results['summary'] = {'status': 'not_implemented', 'trial_count': self.trials}
+        return self.results
+    
+    def save_results(self):
+        """Save results to JSON"""
+        result_file = RESULTS_DIR / "E3_results.json"
+        result_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(result_file, 'w') as f:
+            json.dump(self.results, f, indent=2)
+        logger.info(f"Results saved to {result_file}")
+
+
+class E4ProactiveControlExperiment:
+    """
+    E4: Can DT take proactive control actions?
+    
+    - Monitor for early fault signs
+    - Take action before threshold reached
+    """
+    
+    def __init__(self, trials: int = 3):
+        self.trials = trials
+        self.results = {
+            'timestamp': datetime.now().isoformat(),
+            'experiment': 'E4',
+            'trials': [],
+            'summary': {},
+        }
+    
+    def run(self):
+        logger.info("="*60)
+        logger.info("[E4] Proactive Control Experiment")
+        logger.info("="*60)
+        logger.info("E4 experiment not yet fully implemented")
+        self.results['summary'] = {'status': 'not_implemented', 'trial_count': self.trials}
+        return self.results
+    
+    def save_results(self):
+        """Save results to JSON"""
+        result_file = RESULTS_DIR / "E4_results.json"
+        result_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(result_file, 'w') as f:
+            json.dump(self.results, f, indent=2)
+        logger.info(f"Results saved to {result_file}")
+
+
+class E5CostOptimizationExperiment:
+    """
+    E5: Does DT optimize for cost while maintaining performance?
+    
+    - Run with cost constraints
+    - Verify it minimizes resource usage
+    - Check performance not compromised
+    """
+    
+    def __init__(self, trials: int = 3):
+        self.trials = trials
+        self.results = {
+            'timestamp': datetime.now().isoformat(),
+            'experiment': 'E5',
+            'trials': [],
+            'summary': {},
+        }
+    
+    def run(self):
+        logger.info("="*60)
+        logger.info("[E5] Cost Optimization Experiment")
+        logger.info("="*60)
+        logger.info("E5 experiment not yet fully implemented")
+        self.results['summary'] = {'status': 'not_implemented', 'trial_count': self.trials}
+        return self.results
+    
+    def save_results(self):
+        """Save results to JSON"""
+        result_file = RESULTS_DIR / "E5_results.json"
+        result_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(result_file, 'w') as f:
+            json.dump(self.results, f, indent=2)
+        logger.info(f"Results saved to {result_file}")
+
+
 class ExperimentRunner:
     """Orchestrates all experiments"""
     
