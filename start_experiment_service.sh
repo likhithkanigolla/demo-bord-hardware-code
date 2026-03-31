@@ -38,17 +38,15 @@ fi
 
 PY_VERSION=$($PYTHON_BIN -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 if [ "$PY_VERSION" = "3.13" ]; then
-    echo "ERROR: Python 3.13 detected. pydantic-core build fails on 3.13."
-    echo "Install python3.12 (or 3.11/3.10/3.9) and the matching -venv package, then rerun."
-    exit 1
+    echo "WARNING: Python 3.13 detected. Proceeding with unpinned requirements."
+    echo "If pydantic-core build fails, install python3.12 (or 3.11/3.10/3.9) and rerun."
 fi
 
 # Activate virtual environment
 if [ -d "$VENV_PATH" ]; then
     VENV_VERSION=$($VENV_PATH/bin/python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
     if [ "$VENV_VERSION" = "3.13" ]; then
-        echo "ERROR: Existing venv uses Python 3.13. Remove $VENV_PATH and rerun to recreate with $PYTHON_BIN."
-        exit 1
+        echo "WARNING: Existing venv uses Python 3.13. If pydantic-core build fails, remove $VENV_PATH and rerun with Python 3.12 (or 3.11/3.10/3.9)."
     fi
 else
     echo "Creating virtual environment with $PYTHON_BIN..."
@@ -60,6 +58,7 @@ source "$VENV_PATH/bin/activate"
 # Install dependencies if requirements exist
 if [ -f "requirements.txt" ]; then
     echo "Installing/updating dependencies..."
+    pip install -U pip setuptools wheel
     pip install -r requirements.txt
 fi
 
