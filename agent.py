@@ -21,11 +21,17 @@ import adafruit_sgp30
 
 # ================= LOGGING =================
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Create logs directory if it doesn't exist
+logs_dir = Path(__file__).parent / "logs"
+logs_dir.mkdir(exist_ok=True)
+log_file = logs_dir / "pi_agent.log"
+
 logging.basicConfig(
     level=getattr(logging, log_level, logging.INFO),
     format='[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
     handlers=[
-        logging.FileHandler('/tmp/pi_agent.log'),  # Log to file
+        logging.FileHandler(log_file),  # Log to file
         logging.StreamHandler()  # Also print to console
     ]
 )
