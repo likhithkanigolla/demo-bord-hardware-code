@@ -36,6 +36,11 @@ SENSOR_INTERVAL_SECONDS = 45
 HEARTBEAT_INTERVAL_SECONDS = 15
 COMMAND_POLL_SECONDS = 5
 
+# Configurable sensor interval (can be updated via API)
+SENSOR_INTERVAL_CONFIG = float(os.getenv("SENSOR_INTERVAL_SECONDS", "45"))
+last_sensor_config_fetch = 0
+CONFIG_FETCH_INTERVAL = 300  # Refresh config every 5 minutes
+
 ESP_SEND_INTERVAL = 5  # 🔥 send every 4 sec
 
 
@@ -219,6 +224,30 @@ def post_sensor_data():
     esp_queue.append([0, 0, 0, readings["pir"], 0, 0, [0,0,0], 0])
 
 
+def fetch_sensor_config():
+    """Fetch configurable sensor interval from backend"""
+    global SENSOR_INTERVAL_CONFIG, last_sensor_config_fetch
+    
+    try:
+        r = requests.get(
+            f"{API_BASE}/sensor-config/{NODE_ID}",
+            timeout=3
+        )
+        if r.status_code == 200:
+            config = r.json()
+            new_interval = config.get("sampling_interval_seconds", SENSOR_INTERVAL_CONFIG)
+            if new_interval != SENSOR_INTERVAL_CONFIG:
+                print(f"✓ Sensor interval updated: {SENSOR_INTERVAL_CONFIG}s → {new_interval}s")
+                SENSOR_INTERVAL_CONFIG = new_interval
+            last_sensor_config_fetch = time.time()
+            return True
+    except Exception as e:
+        # Silent fail - use existing config
+        pass
+    
+    return False
+
+
 def post_heartbeat():
     payload = {
         "node_id": NODE_ID,
@@ -282,13 +311,14 @@ def poll_commands():
 
 # ================= MAIN =================
 def main():
-    global last_esp_send
+    global last_esp_send, SENSOR_INTERVAL_CONFIG, last_sensor_config_fetch
 
     print("Agent started")
 
     next_sensor = 0
     next_hb = 0
     next_cmd = 0
+    next_config_fetch = 0
 
     while True:
         now = time.time()
@@ -296,10 +326,15 @@ def main():
         try:
             handle_buttons()
 
-            # SENSOR (30 sec)
+            # FETCH SENSOR CONFIG FROM BACKEND (every 5 min)
+            if now >= next_config_fetch:
+                fetch_sensor_config()
+                next_config_fetch = now + CONFIG_FETCH_INTERVAL
+
+            # SENSOR - Use configurable interval
             if now >= next_sensor:
                 post_sensor_data()
-                next_sensor = now + SENSOR_INTERVAL_SECONDS
+                next_sensor = now + SENSOR_INTERVAL_CONFIG
 
             # HEARTBEAT
             if now >= next_hb:
