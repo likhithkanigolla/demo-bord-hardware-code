@@ -2,12 +2,33 @@
 
 # Pi Experiment Service - Startup Script
 # Place in: /home/pi/digitaltwi/demo-board-hardware-code/
-# Run with: bash start_experiment_service.sh
+# Run with: sudo bash start_experiment_service.sh
 
 set -e
 
+# Check for root privileges (required for GPIO access)
+if [ "$EUID" -ne 0 ]; then 
+    echo "ERROR: This script must be run as root (required for GPIO access)"
+    echo "Try: sudo bash start_experiment_service.sh"
+    exit 1
+fi
+
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
+
+# Cleanup handler - kills background processes on exit
+cleanup() {
+    echo ""
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Shutting down services..."
+    if [ -n "$AGENT_PID" ] && ps -p $AGENT_PID > /dev/null 2>&1; then
+        echo "Stopping Agent (PID: $AGENT_PID)..."
+        kill $AGENT_PID 2>/dev/null || true
+    fi
+    echo "Services stopped."
+    exit 0
+}
+
+trap cleanup SIGINT SIGTERM
 
 # ============ CONFIGURATION ==========
 PI_SERVICE_PORT=${PI_SERVICE_PORT:-8001}
@@ -69,6 +90,16 @@ echo "Starting experiment service on $PI_SERVICE_HOST:$PI_SERVICE_PORT..."
 export PI_SERVICE_PORT=$PI_SERVICE_PORT
 export PI_SERVICE_HOST=$PI_SERVICE_HOST
 export PYTHONUNBUFFERED=1
+export LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+# Start agent in background (continuous sensor collection)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Pi Agent in background (LOG_LEVEL=$LOG_LEVEL)..."
+nohup python3 agent.py > "${SCRIPT_DIR}/logs/pi_agent.log" 2>&1 &
+AGENT_PID=$!
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Agent PID: $AGENT_PID (logs: ${SCRIPT_DIR}/logs/pi_agent.log)"
+
+sleep 2  # Give agent time to initialize
 
 # Run service with logging
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Experiment Service..."
 python3 pi_experiment_service.py 2>&1 | tee -a "$LOG_FILE"
