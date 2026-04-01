@@ -16,9 +16,10 @@ import os
 from dotenv import load_dotenv
 
 # Configure logging
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] [%(levelname)s] %(message)s'
+    level=getattr(logging, log_level, logging.INFO),
+    format='[%(asctime)s] [%(levelname)s] %(name)s: %(message)s'
 )
 logger = logging.getLogger(__name__)
 
@@ -212,7 +213,7 @@ class E1CandidateSelectionExperiment:
         logger.info(f"Executing fan speed {decision['fan_speed']:.1%}")
     
     def save_results(self):
-        """Save results to JSON"""
+        """Save results to JSON and POST to backend"""
         result_file = RESULTS_DIR / "E1_results.json"
         result_file.parent.mkdir(parents=True, exist_ok=True)
         
@@ -224,6 +225,21 @@ class E1CandidateSelectionExperiment:
             json.dump(self.results, f, indent=2)
         
         logger.info(f"Results saved to {result_file}")
+        
+        # POST results to backend
+        try:
+            backend_url = os.getenv("BACKEND_HOST", "http://10.11.0.112:8000")
+            response = requests.post(
+                f"{backend_url}/api/experiments/results/save",
+                json=self.results,
+                timeout=10
+            )
+            if response.status_code == 200:
+                logger.info(f"Results posted to backend successfully")
+            else:
+                logger.warning(f"Backend returned {response.status_code}: {response.text}")
+        except Exception as e:
+            logger.warning(f"Could not POST results to backend: {e}")
 
 
 class E2AccuracyImprovementExperiment:
