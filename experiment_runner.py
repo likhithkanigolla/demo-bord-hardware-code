@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 from pathlib import Path
 import sys
 import os
+from dotenv import load_dotenv
 
 # Configure logging
 logging.basicConfig(
@@ -22,9 +23,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-BACKEND_URL = "https://smartcitylivinglab.iiit.ac.in/smartcitydigitaltwin-api"
-NODE_ID = 1
-TEMPERATURE_THRESHOLD = 30.0
+CONFIG_FILE = Path(__file__).parent / "config" / "config.env"
+if CONFIG_FILE.exists():
+    load_dotenv(CONFIG_FILE)
+
+BACKEND_URL = os.getenv("BACKEND_URL") or os.getenv("BACKEND_HOST") or "http://localhost:8000"
+BACKEND_URL = BACKEND_URL.rstrip("/")
+NODE_ID = int(os.getenv("NODE_ID", "1"))
+TEMPERATURE_THRESHOLD = float(os.getenv("TEMPERATURE_THRESHOLD", "30.0"))
 
 # Experiment config
 EXPERIMENTS_DIR = Path(__file__).parent / "experiments"
@@ -43,9 +49,11 @@ class E1CandidateSelectionExperiment:
     
     def __init__(self, trials: int = 3):
         self.trials = trials
+        self.last_adaptation_error = None
         self.results = {
             'timestamp': datetime.now().isoformat(),
             'experiment': 'E1',
+            'node_id': NODE_ID,
             'trials': [],
             'summary': {},
         }
@@ -56,10 +64,12 @@ class E1CandidateSelectionExperiment:
         logger.info("="*60)
         
         successes = 0
+        run_start = time.time()
         
         for trial in range(self.trials):
             logger.info(f"\n[E1] TRIAL {trial+1}/{self.trials}")
             
+            trial_start = time.time()
             try:
                 # Get current system state
                 state = self._get_current_state()
@@ -74,41 +84,59 @@ class E1CandidateSelectionExperiment:
                 # Step 2: Run adaptation cycle
                 logger.info("[E1-2] Running MAPE cycle...")
                 decision = self._run_adaptation_cycle(state)
-                
+
                 if not decision:
                     logger.warning("[E1] No decision made")
-                    continue
-                
-                logger.info(f"[E1-3] DT selected: {decision['action_id']} "
-                          f"(fan {decision['fan_speed']*100:.0f}%)")
-                
-                # Step 3: Execute and verify
-                logger.info("[E1-4] Executing adaptation...")
-                self._execute_adaptation(decision)
-                time.sleep(10)  # Wait for hardware
-                
-                # Step 4: Verify fault resolved
-                final_state = self._get_current_state()
-                success = final_state['current_temperature'] < TEMPERATURE_THRESHOLD
-                
-                logger.info(f"[E1-5] Result: T={final_state['current_temperature']:.1f}°C - "
-                          f"{'SUCCESS' if success else 'FAILED'}")
+                    final_state = state
+                    success = False
+                    error_message = self.last_adaptation_error or "No decision made"
+                else:
+                    logger.info(f"[E1-3] DT selected: {decision['action_id']} "
+                              f"(fan {decision['fan_speed']*100:.0f}%)")
+
+                    # Step 3: Execute and verify
+                    logger.info("[E1-4] Executing adaptation...")
+                    self._execute_adaptation(decision)
+                    time.sleep(10)  # Wait for hardware
+
+                    # Step 4: Verify fault resolved
+                    final_state = self._get_current_state()
+                    success = final_state['current_temperature'] < TEMPERATURE_THRESHOLD
+                    error_message = None
+
+                    logger.info(f"[E1-5] Result: T={final_state['current_temperature']:.1f}°C - "
+                              f"{'SUCCESS' if success else 'FAILED'}")
                 
                 if success:
                     successes += 1
                 
                 self.results['trials'].append({
                     'trial': trial + 1,
-                    'injected_temp_increase': 5.0,
-                    'adaptation_selected': decision.get('action_id'),
-                    'predicted_effectiveness': decision.get('effectiveness'),
-                    'initial_temp': state['current_temperature'],
-                    'final_temp': final_state['current_temperature'],
+                    'timestamp': datetime.now().isoformat(),
+                    'initial_temperature': state['current_temperature'],
+                    'final_temperature': final_state['current_temperature'],
+                    'fan_speed': decision.get('fan_speed') if decision else state['fan_speed'],
                     'success': success,
+                    'decision': decision.get('action_id') if decision else None,
+                    'effectiveness': decision.get('effectiveness') if decision else None,
+                    'error_message': error_message,
+                    'duration_seconds': time.time() - trial_start,
                 })
                 
             except Exception as e:
                 logger.error(f"[E1] Trial {trial+1} failed: {e}")
+                self.results['trials'].append({
+                    'trial': trial + 1,
+                    'timestamp': datetime.now().isoformat(),
+                    'initial_temperature': state['current_temperature'] if 'state' in locals() else None,
+                    'final_temperature': state['current_temperature'] if 'state' in locals() else None,
+                    'fan_speed': state['fan_speed'] if 'state' in locals() else 0.0,
+                    'success': False,
+                    'decision': None,
+                    'effectiveness': None,
+                    'error_message': str(e),
+                    'duration_seconds': time.time() - trial_start,
+                })
         
         # Summarize
         success_rate = successes / self.trials if self.trials > 0 else 0
@@ -117,6 +145,7 @@ class E1CandidateSelectionExperiment:
             'successful': successes,
             'success_rate': success_rate,
         }
+        self.results['duration_seconds'] = time.time() - run_start
         
         logger.info(f"\n[E1] Summary: {successes}/{self.trials} successful ({success_rate*100:.0f}%)")
         return self.results
@@ -152,6 +181,7 @@ class E1CandidateSelectionExperiment:
     
     def _run_adaptation_cycle(self, state: Dict) -> Optional[Dict]:
         """Call backend MAPE cycle"""
+        self.last_adaptation_error = None
         try:
             response = requests.post(
                 f"{BACKEND_URL}/adaptation/run-cycle",
@@ -169,10 +199,12 @@ class E1CandidateSelectionExperiment:
             
             if result.get('adaptation_decided'):
                 return result
+            self.last_adaptation_error = "Adaptation not decided"
             return None
         
         except Exception as e:
             logger.error(f"Adaptation cycle failed: {e}")
+            self.last_adaptation_error = str(e)
             return None
     
     def _execute_adaptation(self, decision: Dict):
@@ -185,6 +217,10 @@ class E1CandidateSelectionExperiment:
         result_file.parent.mkdir(parents=True, exist_ok=True)
         
         with open(result_file, 'w') as f:
+            json.dump(self.results, f, indent=2)
+
+        latest_file = RESULTS_DIR / "latest_result.json"
+        with open(latest_file, 'w') as f:
             json.dump(self.results, f, indent=2)
         
         logger.info(f"Results saved to {result_file}")

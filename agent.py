@@ -3,8 +3,11 @@ import socket
 import subprocess
 import time
 from datetime import datetime
+import os
+from pathlib import Path
 
 import requests
+from dotenv import load_dotenv
 import board
 import busio
 import RPi.GPIO as GPIO
@@ -15,12 +18,19 @@ import adafruit_sgp30
 
 
 # ================= CONFIG =================
-API_BASE = "https://smartcitylivinglab.iiit.ac.in/smartcitydigitaltwin-api/demo-board"
-NODE_ID = 1
+CONFIG_FILE = Path(__file__).parent / "config" / "config.env"
+if CONFIG_FILE.exists():
+    load_dotenv(CONFIG_FILE)
 
-ESP_IP = "10.2.135.210"
-ESP_PORT = 8100
-ESP_URL = f"http://{ESP_IP}:{ESP_PORT}/data"
+BACKEND_HOST = os.getenv("BACKEND_HOST", "https://smartcitylivinglab.iiit.ac.in/smartcitydigitaltwin-api").rstrip("/")
+API_BASE = f"{BACKEND_HOST}/demo-board"
+NODE_ID = int(os.getenv("NODE_ID", "1"))
+
+ESP_URL = os.getenv("ESP_URL")
+if not ESP_URL:
+    ESP_IP = os.getenv("ESP_IP", "10.2.135.210")
+    ESP_PORT = int(os.getenv("ESP_PORT", "8100"))
+    ESP_URL = f"http://{ESP_IP}:{ESP_PORT}/data"
 
 SENSOR_INTERVAL_SECONDS = 45
 HEARTBEAT_INTERVAL_SECONDS = 15
@@ -236,6 +246,13 @@ def poll_commands():
                     payload = json.loads(payload)
                 except Exception:
                     payload = {}
+
+            try:
+                payload_preview = json.dumps(payload)[:300]
+            except Exception:
+                payload_preview = str(payload)[:300]
+
+            print(f"CMD RECEIVED: id={cmd.get('id')} type={cmd_type} payload={payload_preview}")
 
             status = "executed"
             message = "OK"
