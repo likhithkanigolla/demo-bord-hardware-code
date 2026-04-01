@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 import os
 from pathlib import Path
+import logging
 
 import requests
 from dotenv import load_dotenv
@@ -15,6 +16,20 @@ import RPi.GPIO as GPIO
 import adafruit_veml7700
 import adafruit_si7021
 import adafruit_sgp30
+
+
+# ================= LOGGING =================
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format='[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.FileHandler('/tmp/pi_agent.log'),  # Log to file
+        logging.StreamHandler()  # Also print to console
+    ]
+)
+logger = logging.getLogger(__name__)
+logger.info(f"Pi Agent started with LOG_LEVEL={log_level}")
 
 
 # ================= CONFIG =================
@@ -85,7 +100,7 @@ si7021 = adafruit_si7021.SI7021(i2c)
 sgp30 = adafruit_sgp30.Adafruit_SGP30(i2c)
 sgp30.iaq_init()
 
-print("Waiting for SGP30 stabilization...")
+logger.info("Waiting for SGP30 stabilization...")
 time.sleep(2)
 
 eco2_raw, tvoc_raw = 0, 0
@@ -143,10 +158,10 @@ def send_esp_command(cmd, target_url=None):
         url = _normalize_esp_url(target_url)
         payload = {"cmd": cmd}
         r = requests.post(url, json=payload, timeout=2)
-        print("ESP:", cmd, "|", r.status_code)
+        logger.debug(f"ESP command {cmd}: {r.status_code}")
         return r.ok, f"HTTP {r.status_code}: {r.text[:200]}"
     except Exception as e:
-        print("ESP Error:", e)
+        logger.error(f"ESP Error: {e}")
         return False, str(e)
 
 
@@ -185,7 +200,7 @@ def handle_buttons():
 
                 if name in sensor_enabled:
                     sensor_enabled[name] = not sensor_enabled[name]
-                    print(f"{name} {'ENABLED' if sensor_enabled[name] else 'DISABLED'}")
+                    logger.info(f"{name} {'ENABLED' if sensor_enabled[name] else 'DISABLED'}")
 
                 last_pressed_time[pin] = now
 
@@ -198,10 +213,10 @@ def post_sensor_data():
 
     readings = read_sensors()
 
-    print("\n===== SENSOR DATA =====")
+    logger.info("\n===== SENSOR DATA =====")
     for k, v in readings.items():
-        print(f"{k}: {fmt(v)}")
-    print("=======================\n")
+        logger.info(f"{k}: {fmt(v)}")
+    logger.info("======================\n")
 
     payload = {
         "node_id": NODE_ID,
@@ -213,9 +228,13 @@ def post_sensor_data():
 
     try:
         r = requests.post(f"{API_BASE}/receive-sensor-data", json=payload, timeout=5)
-        print("POST:", r.status_code)
+        if r.status_code == 200:
+            logger.info(f"✓ Sensor data posted successfully: T={fmt(readings['temperature'])}°C, "
+                       f"Lux={fmt(readings['lux'])}, Gas={fmt(readings['gas'])}")
+        else:
+            logger.warning(f"✗ POST failed with status {r.status_code}")
     except Exception as e:
-        print("POST Error:", e)
+        logger.error(f"✗ POST error: {e}")
 
     # -------- ADD TO ESP QUEUE --------
     esp_queue.append([1 if readings["gas"] else 0, 0, 0, 0, 0, 0, [0,0,0], 0])
@@ -237,13 +256,12 @@ def fetch_sensor_config():
             config = r.json()
             new_interval = config.get("sampling_interval_seconds", SENSOR_INTERVAL_CONFIG)
             if new_interval != SENSOR_INTERVAL_CONFIG:
-                print(f"✓ Sensor interval updated: {SENSOR_INTERVAL_CONFIG}s → {new_interval}s")
+                logger.info(f"✓ Sensor interval updated: {SENSOR_INTERVAL_CONFIG}s → {new_interval}s")
                 SENSOR_INTERVAL_CONFIG = new_interval
             last_sensor_config_fetch = time.time()
             return True
     except Exception as e:
-        # Silent fail - use existing config
-        pass
+        logger.debug(f"Config fetch warning (non-critical): {e}")
     
     return False
 
@@ -257,8 +275,9 @@ def post_heartbeat():
 
     try:
         r = requests.post(f"{API_BASE}/node-heartbeat", json=payload, timeout=5)
-        print("Heartbeat:", r.status_code)
-    except:
+        logger.debug(f"Heartbeat sent: {r.status_code}")
+    except Exception as e:
+        logger.debug(f"Heartbeat failed (non-critical): {e}")
         pass
 
 
@@ -281,7 +300,7 @@ def poll_commands():
             except Exception:
                 payload_preview = str(payload)[:300]
 
-            print(f"CMD RECEIVED: id={cmd.get('id')} type={cmd_type} payload={payload_preview}")
+            logger.info(f"CMD RECEIVED: id={cmd.get('id')} type={cmd_type} payload={payload_preview}")
 
             status = "executed"
             message = "OK"
@@ -304,16 +323,16 @@ def poll_commands():
                 json={"status": status, "response_message": message},
                 timeout=5
             )
-            print("ACK:", cmd["id"], status)
+            logger.debug(f"ACK: {cmd['id']} {status}")
     except Exception as exc:
-        print("Command poll error:", exc)
+        logger.error(f"Command poll error: {exc}")
 
 
 # ================= MAIN =================
 def main():
     global last_esp_send, SENSOR_INTERVAL_CONFIG, last_sensor_config_fetch
 
-    print("Agent started")
+    logger.info("Agent started")
 
     next_sensor = 0
     next_hb = 0
@@ -354,7 +373,7 @@ def main():
                     last_esp_send = now
 
         except Exception as e:
-            print("Error:", e)
+            logger.error(f"Error: {e}")
 
         time.sleep(0.1)
 
