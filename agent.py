@@ -1,6 +1,7 @@
 import json
 import socket
 import subprocess
+import sys
 import time
 from datetime import datetime
 import os
@@ -30,7 +31,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logger.info(f"Pi Agent started with LOG_LEVEL={log_level}")
-
+logger.info("="*80)
+logger.info("STARTUP: Initializing Pi Agent...")
+logger.info("="*80)
 
 # ================= CONFIG =================
 CONFIG_FILE = Path(__file__).parent / "config" / "config.env"
@@ -41,11 +44,17 @@ BACKEND_HOST = os.getenv("BACKEND_HOST", "https://smartcitylivinglab.iiit.ac.in/
 API_BASE = f"{BACKEND_HOST}/demo-board"
 NODE_ID = int(os.getenv("NODE_ID", "1"))
 
+logger.info(f"CONFIG: BACKEND_HOST = {BACKEND_HOST}")
+logger.info(f"CONFIG: API_BASE = {API_BASE}")
+logger.info(f"CONFIG: NODE_ID = {NODE_ID}")
+
 ESP_URL = os.getenv("ESP_URL")
 if not ESP_URL:
     ESP_IP = os.getenv("ESP_IP", "10.2.135.210")
     ESP_PORT = int(os.getenv("ESP_PORT", "8100"))
     ESP_URL = f"http://{ESP_IP}:{ESP_PORT}/data"
+
+logger.info(f"CONFIG: ESP_URL = {ESP_URL}")
 
 SENSOR_INTERVAL_SECONDS = 45
 HEARTBEAT_INTERVAL_SECONDS = 15
@@ -57,6 +66,11 @@ last_sensor_config_fetch = 0
 CONFIG_FETCH_INTERVAL = 300  # Refresh config every 5 minutes
 
 ESP_SEND_INTERVAL = 5  # 🔥 send every 4 sec
+
+logger.info(f"CONFIG: SENSOR_INTERVAL = {SENSOR_INTERVAL_CONFIG}s")
+logger.info(f"CONFIG: HEARTBEAT_INTERVAL = {HEARTBEAT_INTERVAL_SECONDS}s")
+logger.info(f"CONFIG: COMMAND_POLL_INTERVAL = {COMMAND_POLL_SECONDS}s")
+logger.info(f"CONFIG: CONFIG_FETCH_INTERVAL = {CONFIG_FETCH_INTERVAL}s")
 
 
 # ================= GPIO =================
@@ -100,8 +114,10 @@ si7021 = adafruit_si7021.SI7021(i2c)
 sgp30 = adafruit_sgp30.Adafruit_SGP30(i2c)
 sgp30.iaq_init()
 
-logger.info("Waiting for SGP30 stabilization...")
+logger.info("INIT: Waiting for SGP30 stabilization...")
 time.sleep(2)
+logger.info("INIT: I2C sensors initialized (VEML7700, SI7021, SGP30)")
+logger.info("="*80)
 
 eco2_raw, tvoc_raw = 0, 0
 
@@ -169,16 +185,34 @@ def send_esp_command(cmd, target_url=None):
 def read_sensors():
     global eco2_raw, tvoc_raw
 
+    logger.debug(f"[SENSOR] Reading sensors at {datetime.utcnow().isoformat()}Z")
+    
     try:
         eco2_raw, tvoc_raw = sgp30.iaq_measure()
-    except:
+        logger.debug(f"[SENSOR] SGP30 read: CO2={eco2_raw}ppm, TVOC={tvoc_raw}")
+    except Exception as e:
+        logger.error(f"[SENSOR] SGP30 read failed: {e}")
         pass
 
-    lux = veml.light if sensor_enabled["Lux"] else None
-    temp = si7021.temperature if sensor_enabled["Temp"] else None
+    try:
+        lux = veml.light if sensor_enabled["Lux"] else None
+        if lux is not None:
+            logger.debug(f"[SENSOR] VEML7700 read: Lux={lux}")
+    except Exception as e:
+        logger.error(f"[SENSOR] VEML7700 read failed: {e}")
+        lux = None
+
+    try:
+        temp = si7021.temperature if sensor_enabled["Temp"] else None
+        if temp is not None:
+            logger.debug(f"[SENSOR] SI7021 read: Temp={temp}°C")
+    except Exception as e:
+        logger.error(f"[SENSOR] SI7021 read failed: {e}")
+        temp = None
 
     gas = eco2_raw if sensor_enabled["CO2"] else None
     pir = get_pir_majority()
+    logger.debug(f"[SENSOR] PIR read: motion={pir}")
 
     return {
         "temperature": temp,
@@ -211,30 +245,48 @@ def handle_buttons():
 def post_sensor_data():
     global esp_queue
 
+    timestamp = datetime.utcnow().isoformat() + "Z"
+    logger.info(f"\n[API CALL] {timestamp} - Posting sensor data...")
+    
     readings = read_sensors()
 
-    logger.info("\n===== SENSOR DATA =====")
-    for k, v in readings.items():
-        logger.info(f"{k}: {fmt(v)}")
-    logger.info("======================\n")
+    logger.info(f"[SENSOR DATA] Collected:")
+    logger.info(f"    Temperature: {fmt(readings['temperature'])}°C")
+    logger.info(f"    Lux: {fmt(readings['lux'])}")
+    logger.info(f"    Gas: {fmt(readings['gas'])}ppm")
+    logger.info(f"    PIR: {readings['pir']}")
 
     payload = {
         "node_id": NODE_ID,
         "sensor_type": "environmental",
         "readings": readings,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": timestamp,
         "metadata": {"source": "raspberry_pi_agent"}
     }
 
+    api_url = f"{API_BASE}/receive-sensor-data"
+    logger.info(f"[API] POST to: {api_url}")
+    logger.debug(f"[PAYLOAD] {json.dumps(payload, indent=2)}")
+    
     try:
-        r = requests.post(f"{API_BASE}/receive-sensor-data", json=payload, timeout=5)
+        logger.info(f"[API] Sending request (timeout=5s)...")
+        r = requests.post(api_url, json=payload, timeout=5)
+        logger.info(f"[API] Response: HTTP {r.status_code}")
+        
         if r.status_code == 200:
-            logger.info(f"✓ Sensor data posted successfully: T={fmt(readings['temperature'])}°C, "
-                       f"Lux={fmt(readings['lux'])}, Gas={fmt(readings['gas'])}")
+            logger.info(f"[SUCCESS] ✓ Sensor data posted successfully")
+            logger.info(f"    T={fmt(readings['temperature'])}°C, Lux={fmt(readings['lux'])}, Gas={fmt(readings['gas'])}ppm")
         else:
-            logger.warning(f"✗ POST failed with status {r.status_code}")
+            logger.warning(f"[FAILURE] ✗ POST returned HTTP {r.status_code}")
+            logger.warning(f"[RESPONSE] {r.text[:200]}")
+    except requests.exceptions.Timeout:
+        logger.error(f"[ERROR] ✗ POST timeout (5s exceeded)")
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"[ERROR] ✗ Connection failed: {e}")
     except Exception as e:
-        logger.error(f"✗ POST error: {e}")
+        logger.error(f"[ERROR] ✗ POST exception: {type(e).__name__}: {e}")
+    
+    logger.info("")
 
     # -------- ADD TO ESP QUEUE --------
     esp_queue.append([1 if readings["gas"] else 0, 0, 0, 0, 0, 0, [0,0,0], 0])
@@ -247,44 +299,80 @@ def fetch_sensor_config():
     """Fetch configurable sensor interval from backend"""
     global SENSOR_INTERVAL_CONFIG, last_sensor_config_fetch
     
+    api_url = f"{API_BASE}/sensor-config/{NODE_ID}"
+    logger.debug(f"[CONFIG FETCH] GET {api_url}")
+    
     try:
-        r = requests.get(
-            f"{API_BASE}/sensor-config/{NODE_ID}",
-            timeout=3
-        )
+        logger.debug(f"[API] Sending request (timeout=3s)...")
+        r = requests.get(api_url, timeout=3)
+        logger.debug(f"[API] Response: HTTP {r.status_code}")
+        
         if r.status_code == 200:
             config = r.json()
+            logger.debug(f"[CONFIG] Received: {config}")
             new_interval = config.get("sampling_interval_seconds", SENSOR_INTERVAL_CONFIG)
             if new_interval != SENSOR_INTERVAL_CONFIG:
-                logger.info(f"✓ Sensor interval updated: {SENSOR_INTERVAL_CONFIG}s → {new_interval}s")
+                logger.info(f"[CONFIG UPDATE] ✓ Sensor interval updated: {SENSOR_INTERVAL_CONFIG}s → {new_interval}s")
                 SENSOR_INTERVAL_CONFIG = new_interval
+            else:
+                logger.debug(f"[CONFIG] No change needed. Current: {SENSOR_INTERVAL_CONFIG}s")
             last_sensor_config_fetch = time.time()
             return True
+        else:
+            logger.debug(f"[CONFIG] Unexpected status code: {r.status_code}")
+            return False
+    except requests.exceptions.Timeout:
+        logger.debug(f"[CONFIG] Fetch timeout (non-critical)")
+    except requests.exceptions.ConnectionError as e:
+        logger.debug(f"[CONFIG] Connection failed (non-critical): {e}")
     except Exception as e:
-        logger.debug(f"Config fetch warning (non-critical): {e}")
+        logger.debug(f"[CONFIG] Fetch failed (non-critical): {type(e).__name__}: {e}")
     
     return False
 
 
 def post_heartbeat():
+    timestamp = datetime.utcnow().isoformat() + "Z"
+    ip = get_local_ip()
+    
     payload = {
         "node_id": NODE_ID,
-        "ip_address": get_local_ip(),
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "ip_address": ip,
+        "timestamp": timestamp,
     }
+    
+    api_url = f"{API_BASE}/node-heartbeat"
+    logger.debug(f"[HEARTBEAT] POST {api_url}")
 
     try:
-        r = requests.post(f"{API_BASE}/node-heartbeat", json=payload, timeout=5)
-        logger.debug(f"Heartbeat sent: {r.status_code}")
+        logger.debug(f"[API] Sending heartbeat (node_id={NODE_ID}, ip={ip})")
+        r = requests.post(api_url, json=payload, timeout=5)
+        logger.debug(f"[API] Response: HTTP {r.status_code}")
+        
+        if r.status_code == 200:
+            logger.debug(f"[HEARTBEAT] ✓ Heartbeat sent successfully")
+        else:
+            logger.debug(f"[HEARTBEAT] ⚠ Heartbeat failed: HTTP {r.status_code}")
     except Exception as e:
-        logger.debug(f"Heartbeat failed (non-critical): {e}")
-        pass
+        logger.debug(f"[HEARTBEAT] ⚠ Heartbeat failed (non-critical): {type(e).__name__}: {e}")
 
 
 def poll_commands():
+    api_url = f"{API_BASE}/commands/{NODE_ID}?status=pending"
+    logger.debug(f"[POLL COMMANDS] GET {api_url}")
+    
     try:
-        r = requests.get(f"{API_BASE}/commands/{NODE_ID}?status=pending", timeout=5)
+        logger.debug(f"[API] Polling for commands (timeout=5s)...")
+        r = requests.get(api_url, timeout=5)
+        logger.debug(f"[API] Response: HTTP {r.status_code}")
+        
         data = r.json()
+        cmd_count = len(data.get("commands", []))
+        
+        if cmd_count > 0:
+            logger.info(f"[COMMANDS] Found {cmd_count} pending command(s)")
+        else:
+            logger.debug(f"[COMMANDS] No pending commands")
 
         for cmd in data.get("commands", []):
             cmd_type = cmd.get("command_type")
@@ -300,7 +388,8 @@ def poll_commands():
             except Exception:
                 payload_preview = str(payload)[:300]
 
-            logger.info(f"CMD RECEIVED: id={cmd.get('id')} type={cmd_type} payload={payload_preview}")
+            logger.info(f"[COMMAND] RECEIVED: id={cmd.get('id')} type={cmd_type}")
+            logger.debug(f"[COMMAND] Payload: {payload_preview}")
 
             status = "executed"
             message = "OK"
@@ -318,50 +407,100 @@ def poll_commands():
             else:
                 message = f"Skipped unsupported command: {cmd_type}"
 
-            requests.post(
-                f"{API_BASE}/commands/{cmd['id']}/ack",
-                json={"status": status, "response_message": message},
-                timeout=5
-            )
-            logger.debug(f"ACK: {cmd['id']} {status}")
+            ack_url = f"{API_BASE}/commands/{cmd['id']}/ack"
+            logger.debug(f"[ACK] Sending ACK to {ack_url}")
+            
+            try:
+                ack_r = requests.post(
+                    ack_url,
+                    json={"status": status, "response_message": message},
+                    timeout=5
+                )
+                logger.info(f"[COMMAND] ACK sent: id={cmd['id']} status={status} (HTTP {ack_r.status_code})")
+            except Exception as ack_e:
+                logger.error(f"[COMMAND] ACK failed: id={cmd['id']} error={ack_e}")
+    except requests.exceptions.Timeout:
+        logger.debug(f"[POLL] Timeout (non-critical)")
+    except requests.exceptions.ConnectionError as e:
+        logger.debug(f"[POLL] Connection failed (non-critical): {e}")
     except Exception as exc:
-        logger.error(f"Command poll error: {exc}")
+        logger.error(f"[POLL] Command poll error: {type(exc).__name__}: {exc}")
 
 
 # ================= MAIN =================
 def main():
     global last_esp_send, SENSOR_INTERVAL_CONFIG, last_sensor_config_fetch
 
-    logger.info("Agent started")
+    logger.info("="*80)
+    logger.info("[MAIN] Agent started - entering main loop")
+    logger.info("="*80)
+    
+    # Check root privileges - required for GPIO access
+    logger.info("[STARTUP] Checking root privileges...")
+    if os.geteuid() != 0:
+        logger.error("[STARTUP] ✗ ERROR: This script must be run as root (required for GPIO access)")
+        logger.error("[STARTUP] Try: sudo python pi_experiment_service.py")
+        sys.exit(1)
+    logger.info("[STARTUP] ✓ Running as root")
+    
+    # Test initial connection to backend root API
+    logger.info("[STARTUP] Testing backend root API connectivity...")
+    try:
+        root_url = BACKEND_HOST
+        logger.info(f"[STARTUP] GET {root_url} (root API test)")
+        r = requests.get(root_url, timeout=3)
+        logger.info(f"[STARTUP] Root API response: HTTP {r.status_code} ✓")
+    except Exception as e:
+        logger.warning(f"[STARTUP] ⚠ Could not reach root API immediately: {e}")
+        logger.warning(f"[STARTUP] Will retry on normal schedule...")
+    
+    # Test initial connection to demo-board API
+    logger.info("[STARTUP] Testing demo-board API connectivity...")
+    try:
+        test_url = API_BASE
+        logger.info(f"[STARTUP] GET {test_url} (demo-board API test)")
+        r = requests.get(test_url, timeout=3)
+        logger.info(f"[STARTUP] Demo-board API response: HTTP {r.status_code} ✓")
+    except Exception as e:
+        logger.warning(f"[STARTUP] ⚠ Could not reach demo-board API immediately: {e}")
+        logger.warning(f"[STARTUP] Will retry on normal schedule...")
+    
+    logger.info("[MAIN] Starting sensor loop...\n")
 
     next_sensor = 0
     next_hb = 0
     next_cmd = 0
     next_config_fetch = 0
+    loop_count = 0
 
     while True:
         now = time.time()
+        loop_count += 1
 
         try:
             handle_buttons()
 
             # FETCH SENSOR CONFIG FROM BACKEND (every 5 min)
             if now >= next_config_fetch:
+                logger.info(f"[TIMER] Config fetch interval reached")
                 fetch_sensor_config()
                 next_config_fetch = now + CONFIG_FETCH_INTERVAL
 
             # SENSOR - Use configurable interval
             if now >= next_sensor:
+                logger.info(f"[TIMER] Sensor interval reached ({SENSOR_INTERVAL_CONFIG}s)")
                 post_sensor_data()
                 next_sensor = now + SENSOR_INTERVAL_CONFIG
 
             # HEARTBEAT
             if now >= next_hb:
+                logger.debug(f"[TIMER] Heartbeat interval reached ({HEARTBEAT_INTERVAL_SECONDS}s)")
                 post_heartbeat()
                 next_hb = now + HEARTBEAT_INTERVAL_SECONDS
 
             # COMMAND POLL
             if now >= next_cmd:
+                logger.debug(f"[TIMER] Command poll interval reached ({COMMAND_POLL_SECONDS}s)")
                 poll_commands()
                 next_cmd = now + COMMAND_POLL_SECONDS
 
@@ -369,11 +508,14 @@ def main():
             if now - last_esp_send >= ESP_SEND_INTERVAL:
                 if len(esp_queue) > 0:
                     cmd = esp_queue.pop(0)
+                    logger.debug(f"[ESP] Sending queued command")
                     send_esp_command(cmd)
                     last_esp_send = now
 
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"[MAIN LOOP] Exception: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(f"[TRACEBACK] {traceback.format_exc()}")
 
         time.sleep(0.1)
 
