@@ -37,6 +37,57 @@ TEMPERATURE_THRESHOLD = float(os.getenv("TEMPERATURE_THRESHOLD", "30.0"))
 EXPERIMENTS_DIR = Path(__file__).parent / "experiments"
 RESULTS_DIR = EXPERIMENTS_DIR / "results"
 
+# Try to import sensor reading from agent if available
+try:
+    from agent import read_sensors
+    SENSOR_AVAILABLE = True
+except ImportError:
+    SENSOR_AVAILABLE = False
+    logger.warning("Sensor reading not available - running in simulation mode")
+    def read_sensors():
+        # Fallback: return dummy sensor data
+        return {
+            "temperature": 25.0,
+            "humidity": 60.0,
+            "lux": 350,
+            "gas": 400,
+            "pir": 0
+        }
+
+
+def send_sensor_data_to_backend(readings: Dict, metadata: Optional[Dict] = None) -> bool:
+    """
+    Send sensor readings to backend for storage and analysis.
+    
+    Args:
+        readings: Dict with temperature, humidity, lux, gas, pir
+        metadata: Optional metadata like 'phase', 'trial', etc.
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        payload = {
+            "node_id": NODE_ID,
+            "sensor_type": "environmental",
+            "readings": readings,
+            "timestamp": datetime.now().isoformat(),
+            "metadata": metadata or {}
+        }
+        
+        url = f"{BACKEND_URL}/demo-board/receive-sensor-data"
+        response = requests.post(url, json=payload, timeout=5)
+        
+        if response.status_code == 200:
+            logger.info(f"✓ Sensor data sent to backend: {readings}")
+            return True
+        else:
+            logger.warning(f"Backend returned {response.status_code}: {response.text[:100]}")
+            return False
+    except Exception as e:
+        logger.warning(f"Failed to send sensor data: {e}")
+        return False
+
 
 class E1CandidateSelectionExperiment:
     """
@@ -71,16 +122,37 @@ class E1CandidateSelectionExperiment:
             logger.info(f"\n[E1] TRIAL {trial+1}/{self.trials}")
             
             trial_start = time.time()
+            trial_sensor_readings = []  # Collect sensor readings during trial
+            
             try:
                 # Get current system state
                 state = self._get_current_state()
                 logger.info(f"Current state: T={state['current_temperature']:.1f}°C, "
                           f"fan={state['fan_speed']:.1%}")
                 
+                # Read baseline sensors
+                baseline_sensors = read_sensors()
+                trial_sensor_readings.append(('baseline', baseline_sensors.copy()))
+                send_sensor_data_to_backend(baseline_sensors, {
+                    'trial': trial + 1,
+                    'phase': 'baseline',
+                    'experiment': 'E1'
+                })
+                
                 # Step 1: Inject temperature jump
                 logger.info("[E1-1] Injecting temperature fault...")
                 self._inject_temperature_jump(5.0)  # +5°C
                 time.sleep(2)
+                
+                # Read sensors after fault injection
+                fault_sensors = read_sensors()
+                trial_sensor_readings.append(('fault_injected', fault_sensors.copy()))
+                send_sensor_data_to_backend(fault_sensors, {
+                    'trial': trial + 1,
+                    'phase': 'fault_injected',
+                    'experiment': 'E1',
+                    'injected_temp_delta': 5.0
+                })
                 
                 # Step 2: Run adaptation cycle
                 logger.info("[E1-2] Running MAPE cycle...")
@@ -99,6 +171,17 @@ class E1CandidateSelectionExperiment:
                     logger.info("[E1-4] Executing adaptation...")
                     self._execute_adaptation(decision)
                     time.sleep(10)  # Wait for hardware
+                    
+                    # Read sensors after adaptation
+                    adapted_sensors = read_sensors()
+                    trial_sensor_readings.append(('adapted', adapted_sensors.copy()))
+                    send_sensor_data_to_backend(adapted_sensors, {
+                        'trial': trial + 1,
+                        'phase': 'adapted',
+                        'experiment': 'E1',
+                        'fan_speed': decision['fan_speed'],
+                        'action': decision['action_id']
+                    })
 
                     # Step 4: Verify fault resolved
                     final_state = self._get_current_state()
@@ -122,6 +205,7 @@ class E1CandidateSelectionExperiment:
                     'effectiveness': decision.get('effectiveness') if decision else None,
                     'error_message': error_message,
                     'duration_seconds': time.time() - trial_start,
+                    'sensor_readings': trial_sensor_readings,  # Include sensor data
                 })
                 
             except Exception as e:
@@ -137,6 +221,7 @@ class E1CandidateSelectionExperiment:
                     'effectiveness': None,
                     'error_message': str(e),
                     'duration_seconds': time.time() - trial_start,
+                    'sensor_readings': trial_sensor_readings,  # Include sensor data from trial
                 })
         
         # Summarize
