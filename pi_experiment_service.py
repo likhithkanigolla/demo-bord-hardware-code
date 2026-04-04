@@ -219,7 +219,7 @@ COMPLETION_MESSAGE = "Experiment completed successfully"
 
 # Backend API endpoint to receive results
 BACKEND_HOST = os.getenv("BACKEND_HOST", "https://smartcitylivinglab.iiit.ac.in/smartcitydigitaltwin-api").rstrip("/")
-BACKEND_RESULTS_ENDPOINT = f"{BACKEND_HOST}/experiments/results/save"
+BACKEND_RESULTS_ENDPOINT = f"{BACKEND_HOST}/api/experiment-execution/results"
 
 # ============ HELPER FUNCTIONS ==========
 
