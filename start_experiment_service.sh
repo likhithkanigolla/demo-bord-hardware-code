@@ -1,10 +1,26 @@
 #!/bin/bash
 
-# Pi Experiment Service - Startup Script
+# Pi Experiment Service - Startup Script with Auto-Restart Support
 # Place in: /home/pi/digitaltwi/demo-board-hardware-code/
-# Run with: sudo bash start_experiment_service.sh
+# 
+# Usage:
+#   sudo bash start_experiment_service.sh                    # Normal mode (no restart)
+#   sudo bash start_experiment_service.sh --watch            # Auto-restart on code changes
+#   sudo bash start_experiment_service.sh --watch-realtime   # Real-time auto-restart (inotify)
 
 set -e
+
+# ============ PARSE ARGUMENTS ==========
+WATCH_MODE=false
+WATCH_REALTIME=false
+
+for arg in "$@"; do
+    case $arg in
+        --watch) WATCH_MODE=true ;;
+        --watch-realtime) WATCH_REALTIME=true; WATCH_MODE=true ;;
+        *) echo "Unknown option: $arg" ;;
+    esac
+done
 
 # Check for root privileges (required for GPIO access)
 if [ "$EUID" -ne 0 ]; then 
@@ -85,21 +101,128 @@ fi
 
 # ============ START SERVICE ==========
 
+# ============ START SERVICE ==========
+
+start_services() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Experiment Service..."
+    
+    export PI_SERVICE_PORT=$PI_SERVICE_PORT
+    export PI_SERVICE_HOST=$PI_SERVICE_HOST
+    export PYTHONUNBUFFERED=1
+    export LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+    # Start agent in background (continuous sensor collection)
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Pi Agent in background (LOG_LEVEL=$LOG_LEVEL)..."
+    nohup python3 agent.py > "${SCRIPT_DIR}/logs/pi_agent.log" 2>&1 &
+    AGENT_PID=$!
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Agent PID: $AGENT_PID (logs: ${SCRIPT_DIR}/logs/pi_agent.log)"
+
+    sleep 2  # Give agent time to initialize
+
+    # Run service with logging
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Experiment Service..."
+    python3 pi_experiment_service.py 2>&1 | tee -a "$LOG_FILE"
+}
+
+stop_services() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Stopping services..."
+    if [ -n "$AGENT_PID" ] && ps -p $AGENT_PID > /dev/null 2>&1; then
+        echo "Stopping Agent (PID: $AGENT_PID)..."
+        kill $AGENT_PID 2>/dev/null || true
+        sleep 1
+    fi
+    AGENT_PID=""
+}
+
+# ============ AUTO-WATCH MODE ==========
+
+get_file_hash() {
+    find "$SCRIPT_DIR" -type f \( -name "*.py" -o -name "config.env" \) \
+        -not -path "*/\.*" -not -path "*/__pycache__/*" -not -path "*/logs/*" \
+        -exec md5sum {} \; 2>/dev/null | sort | md5sum | awk '{print $1}'
+}
+
+watch_and_restart() {
+    echo ""
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ========================================="
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] AUTO-WATCH MODE ENABLED"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Services will restart on code changes"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Press Ctrl+C to stop"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ========================================="
+    echo ""
+    
+    LAST_HASH=""
+    CHECK_INTERVAL=2
+    
+    while true; do
+        sleep $CHECK_INTERVAL
+        current_hash=$(get_file_hash)
+        
+        if [ -z "$LAST_HASH" ]; then
+            LAST_HASH="$current_hash"
+            continue
+        fi
+        
+        if [ "$LAST_HASH" != "$current_hash" ]; then
+            echo ""
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️  CODE CHANGES DETECTED!"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Restarting services..."
+            echo ""
+            
+            stop_services
+            sleep 1
+            start_services
+            
+            LAST_HASH="$current_hash"
+        fi
+    done
+}
+
+watch_and_restart_realtime() {
+    if ! command -v inotifywait &> /dev/null; then
+        echo "ERROR: inotifywait not found"
+        echo "Install with: sudo apt-get install inotify-tools"
+        echo "Or use: sudo bash start_experiment_service.sh --watch (polling mode)"
+        exit 1
+    fi
+    
+    echo ""
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ========================================="
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] AUTO-WATCH MODE (Real-time) ENABLED"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Using inotifywait for instant restarts"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Press Ctrl+C to stop"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ========================================="
+    echo ""
+    
+    inotifywait -m -r -e modify,create,delete \
+        "$SCRIPT_DIR/*.py" \
+        "$SCRIPT_DIR/config/config.env" \
+        "$SCRIPT_DIR/pi_deployment/*.py" 2>/dev/null | while read -r dir action file; do
+        
+        # Skip cache files
+        if [[ "$file" =~ \.pyc$ ]] || [[ "$file" =~ __pycache__ ]] || [[ "$file" =~ \.swp$ ]]; then
+            continue
+        fi
+        
+        echo ""
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️  CODE CHANGES DETECTED: $dir$file"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Restarting services..."
+        echo ""
+        
+        stop_services
+        sleep 1
+        start_services
+    done
+}
+
+# ============ MAIN ==========
+
 echo "Starting experiment service on $PI_SERVICE_HOST:$PI_SERVICE_PORT..."
 
-export PI_SERVICE_PORT=$PI_SERVICE_PORT
-export PI_SERVICE_HOST=$PI_SERVICE_HOST
-export PYTHONUNBUFFERED=1
-export LOG_LEVEL=${LOG_LEVEL:-INFO}
-
-# Start agent in background (continuous sensor collection)
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Pi Agent in background (LOG_LEVEL=$LOG_LEVEL)..."
-nohup python3 agent.py > "${SCRIPT_DIR}/logs/pi_agent.log" 2>&1 &
-AGENT_PID=$!
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Agent PID: $AGENT_PID (logs: ${SCRIPT_DIR}/logs/pi_agent.log)"
-
-sleep 2  # Give agent time to initialize
-
-# Run service with logging
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Experiment Service..."
-python3 pi_experiment_service.py 2>&1 | tee -a "$LOG_FILE"
+if [ "$WATCH_REALTIME" = true ]; then
+    watch_and_restart_realtime
+elif [ "$WATCH_MODE" = true ]; then
+    watch_and_restart
+else
+    start_services
+fi
