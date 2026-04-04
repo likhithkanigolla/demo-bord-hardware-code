@@ -155,13 +155,6 @@ async def get_experiment_logs(execution_id: str):
         'results': experiment_results.get(execution_id, None)
     }
 
-def emit_log(execution_id: str, level: str, message: str):
-    """Synchronous wrapper to emit logs to WebSocket clients"""
-    try:
-        asyncio.create_task(broadcast_log(execution_id, level, message))
-    except:
-        pass  # Silently fail if no event loop
-
 # ============ PYDANTIC MODELS ============
 
 class FaultInjectionConfig(BaseModel):
@@ -242,31 +235,26 @@ def _send_results_to_backend(execution_id: str, experiment_type: str, results: d
         }
         
         logger.info(f"[{execution_id}] Sending results to backend: {BACKEND_RESULTS_ENDPOINT}")
-        asyncio.create_task(broadcast_log(execution_id, "INFO", f"Sending results to backend..."))
         
         response = requests.post(BACKEND_RESULTS_ENDPOINT, json=payload, timeout=10)
         
         if response.ok:
             msg = f"✓ Results sent to backend successfully (HTTP {response.status_code})"
             logger.info(f"[{execution_id}] {msg}")
-            asyncio.create_task(broadcast_log(execution_id, "SUCCESS", msg))
             # Store results for later retrieval
             experiment_results[execution_id] = payload
         else:
             msg = f"⚠️  Failed to send results to backend: HTTP {response.status_code}"
             logger.warning(f"[{execution_id}] {msg}")
-            asyncio.create_task(broadcast_log(execution_id, "WARNING", msg))
     except Exception as e:
         msg = f"❌ Error sending results to backend: {e}"
         logger.error(f"[{execution_id}] {msg}", exc_info=True)
-        asyncio.create_task(broadcast_log(execution_id, "ERROR", msg))
 
 def _run_e1_experiment(execution_id: str, state: ExperimentState, req: ExperimentRequest):
     """Run E1 experiment and update state"""
     try:
         state.trials_total = req.trials
         logger.info(f"[{execution_id}] Starting E1 with {req.trials} trials")
-        emit_log(execution_id, "INFO", f"Starting E1 experiment with {req.trials} trials...")
         
         experiment = E1CandidateSelectionExperiment(trials=req.trials)
         
@@ -282,14 +270,12 @@ def _run_e1_experiment(execution_id: str, state: ExperimentState, req: Experimen
         state.current_message = COMPLETION_MESSAGE
         
         logger.info(f"[{execution_id}] E1 completed with {state.trials_completed} trials")
-        emit_log(execution_id, "SUCCESS", f"E1 completed: {state.trials_completed}/{req.trials} trials successful")
         
         # Send results back to backend
         _send_results_to_backend(execution_id, "E1", state.results)
     
     except Exception as e:
         logger.error(f"[{execution_id}] E1 failed: {e}", exc_info=True)
-        emit_log(execution_id, "ERROR", f"E1 failed: {str(e)}")
         state.status = "failed"
         state.error = str(e)
         state.current_message = f"Error: {str(e)}"
