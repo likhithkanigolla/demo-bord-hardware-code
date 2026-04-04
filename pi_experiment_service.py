@@ -11,15 +11,16 @@ This FastAPI service:
 Port: 8001 (internal to Pi network)
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 from datetime import datetime
 import json
 import logging
 import time
 import os
 import sys
+import requests
 from pathlib import Path
 import asyncio
 from enum import Enum
@@ -43,8 +44,123 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ============ CUSTOM LOG HANDLER FOR WEBSOCKET STREAMING ============
+class WebSocketLogHandler(logging.Handler):
+    """Custom handler that broadcasts logs to WebSocket clients"""
+    def emit(self, record):
+        """Emit a log record"""
+        # Extract execution_id from the message if it exists (format: [execution_id] message)
+        msg = self.format(record)
+        
+        # Try to extract execution_id from message
+        execution_id = None
+        if '[' in msg and ']' in msg:
+            try:
+                start = msg.find('[')
+                end = msg.find(']', start)
+                potential_id = msg[start+1:end]
+                if '_' in potential_id or potential_id.startswith('E'):
+                    execution_id = potential_id
+            except:
+                pass
+        
+        # Broadcast if we found an execution_id
+        if execution_id:
+            level_name = record.levelname
+            try:
+                asyncio.create_task(broadcast_log(execution_id, level_name, msg))
+            except:
+                pass
+
+# Add the WebSocket handler to the logger
+ws_handler = WebSocketLogHandler()
+ws_handler.setFormatter(logging.Formatter('[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s'))
+logger.addHandler(ws_handler)
+
 app = FastAPI(title="Pi Experiment Service", version="1.0")
 start_time = time.time()  # Track service start time for uptime calculation
+
+# ============ WEBSOCKET & LOG STREAMING ============
+# Store active WebSocket connections per execution
+active_connections: Dict[str, Set[WebSocket]] = {}
+experiment_logs: Dict[str, List[Dict]] = {}  # Store logs for each execution
+experiment_results: Dict[str, Dict] = {}  # Store final results
+
+async def broadcast_log(execution_id: str, level: str, message: str):
+    """Send log message to all connected WebSocket clients for this execution"""
+    log_entry = {
+        'timestamp': datetime.now().isoformat(),
+        'level': level,
+        'message': message
+    }
+    
+    # Store log
+    if execution_id not in experiment_logs:
+        experiment_logs[execution_id] = []
+    experiment_logs[execution_id].append(log_entry)
+    
+    # Broadcast to connected clients
+    if execution_id in active_connections:
+        disconnected = set()
+        for websocket in active_connections[execution_id]:
+            try:
+                await websocket.send_json(log_entry)
+            except:
+                disconnected.add(websocket)
+        
+        # Remove disconnected clients
+        active_connections[execution_id] -= disconnected
+
+# ============ WEBSOCKET ENDPOINTS ============
+
+@app.websocket("/ws/experiment/{execution_id}")
+async def websocket_experiment_logs(websocket: WebSocket, execution_id: str):
+    """WebSocket endpoint for streaming experiment logs and results to frontend"""
+    await websocket.accept()
+    
+    # Add this connection to the set
+    if execution_id not in active_connections:
+        active_connections[execution_id] = set()
+    active_connections[execution_id].add(websocket)
+    
+    logger_internal = logging.getLogger(__name__)
+    logger_internal.info(f"[WS] Client connected to {execution_id}")
+    
+    try:
+        # Send any logs that already exist from before connection
+        if execution_id in experiment_logs:
+            for log_entry in experiment_logs[execution_id]:
+                await websocket.send_json(log_entry)
+        
+        # Keep connection alive and handle incoming messages
+        while True:
+            data = await websocket.receive_text()
+            # Echo back for keepalive
+            if data == "ping":
+                await websocket.send_text("pong")
+    except Exception as e:
+        logger_internal.error(f"[WS] Error on {execution_id}: {e}")
+    finally:
+        # Remove this connection
+        if execution_id in active_connections:
+            active_connections[execution_id].discard(websocket)
+        logger_internal.info(f"[WS] Client disconnected from {execution_id}")
+
+@app.get("/api/experiment/{execution_id}/logs")
+async def get_experiment_logs(execution_id: str):
+    """Get all logs for an execution"""
+    return {
+        'execution_id': execution_id,
+        'logs': experiment_logs.get(execution_id, []),
+        'results': experiment_results.get(execution_id, None)
+    }
+
+def emit_log(execution_id: str, level: str, message: str):
+    """Synchronous wrapper to emit logs to WebSocket clients"""
+    try:
+        asyncio.create_task(broadcast_log(execution_id, level, message))
+    except:
+        pass  # Silently fail if no event loop
 
 # ============ PYDANTIC MODELS ============
 
@@ -108,13 +224,49 @@ class ExperimentState:
 # ============ CONSTANTS ==========
 COMPLETION_MESSAGE = "Experiment completed successfully"
 
+# Backend API endpoint to receive results
+BACKEND_HOST = os.getenv("BACKEND_HOST", "https://smartcitylivinglab.iiit.ac.in/smartcitydigitaltwin-api").rstrip("/")
+BACKEND_RESULTS_ENDPOINT = f"{BACKEND_HOST}/experiments/results/save"
+
 # ============ HELPER FUNCTIONS ==========
+
+def _send_results_to_backend(execution_id: str, experiment_type: str, results: dict):
+    """Send completed experiment results back to backend"""
+    try:
+        payload = {
+            'execution_id': execution_id,
+            'experiment_type': experiment_type,
+            'trials': results.get('trials', []),
+            'summary': results.get('summary', {}),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        logger.info(f"[{execution_id}] Sending results to backend: {BACKEND_RESULTS_ENDPOINT}")
+        asyncio.create_task(broadcast_log(execution_id, "INFO", f"Sending results to backend..."))
+        
+        response = requests.post(BACKEND_RESULTS_ENDPOINT, json=payload, timeout=10)
+        
+        if response.ok:
+            msg = f"✓ Results sent to backend successfully (HTTP {response.status_code})"
+            logger.info(f"[{execution_id}] {msg}")
+            asyncio.create_task(broadcast_log(execution_id, "SUCCESS", msg))
+            # Store results for later retrieval
+            experiment_results[execution_id] = payload
+        else:
+            msg = f"⚠️  Failed to send results to backend: HTTP {response.status_code}"
+            logger.warning(f"[{execution_id}] {msg}")
+            asyncio.create_task(broadcast_log(execution_id, "WARNING", msg))
+    except Exception as e:
+        msg = f"❌ Error sending results to backend: {e}"
+        logger.error(f"[{execution_id}] {msg}", exc_info=True)
+        asyncio.create_task(broadcast_log(execution_id, "ERROR", msg))
 
 def _run_e1_experiment(execution_id: str, state: ExperimentState, req: ExperimentRequest):
     """Run E1 experiment and update state"""
     try:
         state.trials_total = req.trials
         logger.info(f"[{execution_id}] Starting E1 with {req.trials} trials")
+        emit_log(execution_id, "INFO", f"Starting E1 experiment with {req.trials} trials...")
         
         experiment = E1CandidateSelectionExperiment(trials=req.trials)
         
@@ -130,9 +282,14 @@ def _run_e1_experiment(execution_id: str, state: ExperimentState, req: Experimen
         state.current_message = COMPLETION_MESSAGE
         
         logger.info(f"[{execution_id}] E1 completed with {state.trials_completed} trials")
+        emit_log(execution_id, "SUCCESS", f"E1 completed: {state.trials_completed}/{req.trials} trials successful")
+        
+        # Send results back to backend
+        _send_results_to_backend(execution_id, "E1", state.results)
     
     except Exception as e:
         logger.error(f"[{execution_id}] E1 failed: {e}", exc_info=True)
+        emit_log(execution_id, "ERROR", f"E1 failed: {str(e)}")
         state.status = "failed"
         state.error = str(e)
         state.current_message = f"Error: {str(e)}"
@@ -156,6 +313,9 @@ def _run_e2_experiment(execution_id: str, state: ExperimentState, req: Experimen
         state.current_message = COMPLETION_MESSAGE
         
         logger.info(f"[{execution_id}] E2 completed with {state.trials_completed} trials")
+        
+        # Send results back to backend
+        _send_results_to_backend(execution_id, "E2", state.results)
     
     except Exception as e:
         logger.error(f"[{execution_id}] E2 failed: {e}", exc_info=True)
@@ -181,6 +341,9 @@ def _run_e3_experiment(execution_id: str, state: ExperimentState, req: Experimen
         state.current_message = COMPLETION_MESSAGE
         
         logger.info(f"[{execution_id}] E3 completed with {state.trials_completed} trials")
+        
+        # Send results back to backend
+        _send_results_to_backend(execution_id, "E3", state.results)
     
     except Exception as e:
         logger.error(f"[{execution_id}] E3 failed: {e}", exc_info=True)
@@ -206,6 +369,9 @@ def _run_e4_experiment(execution_id: str, state: ExperimentState, req: Experimen
         state.current_message = COMPLETION_MESSAGE
         
         logger.info(f"[{execution_id}] E4 completed with {state.trials_completed} trials")
+        
+        # Send results back to backend
+        _send_results_to_backend(execution_id, "E4", state.results)
     
     except Exception as e:
         logger.error(f"[{execution_id}] E4 failed: {e}", exc_info=True)
@@ -229,6 +395,15 @@ def _run_e5_experiment(execution_id: str, state: ExperimentState, req: Experimen
         state.trials_completed = len(state.results['trials'])
         state.status = "completed"
         state.current_message = COMPLETION_MESSAGE
+        
+        logger.info(f"[{execution_id}] E5 completed with {state.trials_completed} trials")
+        
+        # Send results back to backend
+        _send_results_to_backend(execution_id, "E5", state.results)
+    
+    except Exception as e:
+        logger.error(f"[{execution_id}] E5 failed: {e}", exc_info=True)
+        state.status = "failed"
         
         logger.info(f"[{execution_id}] E5 completed with {state.trials_completed} trials")
     
