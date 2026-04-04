@@ -179,11 +179,30 @@ def send_esp_command(cmd, target_url=None):
     try:
         url = _normalize_esp_url(target_url)
         payload = {"cmd": cmd}
+        
+        # Log the command being sent
+        logger.info(f"[ESP COMMAND] Sending to {url}")
+        logger.info(f"[ESP COMMAND] Payload: {json.dumps(payload)}")
+        logger.info(f"[ESP COMMAND] Command array breakdown:")
+        if isinstance(cmd, list) and len(cmd) >= 8:
+            logger.info(f"  - Random prefix: {cmd[0:4]}")
+            logger.info(f"  - Buzzer mode: {cmd[4]}")
+            logger.info(f"  - LED state: {cmd[5]} (0=OFF, 1=ON)")
+            logger.info(f"  - RGB color: {cmd[6]} [R, G, B]")
+            logger.info(f"  - Fan speed: {cmd[7]} (0-255)")
+        else:
+            logger.info(f"  - Command format unexpected: {cmd}")
+        
         r = requests.post(url, json=payload, timeout=2)
-        logger.debug(f"ESP command {cmd}: {r.status_code}")
+        
+        if r.ok:
+            logger.info(f"✓ ESP command sent successfully: HTTP {r.status_code}")
+        else:
+            logger.warning(f"✗ ESP command failed: HTTP {r.status_code}: {r.text[:200]}")
+        
         return r.ok, f"HTTP {r.status_code}: {r.text[:200]}"
     except Exception as e:
-        logger.error(f"ESP Error: {e}")
+        logger.error(f"❌ ESP Error: {e}")
         return False, str(e)
 
 
@@ -403,13 +422,21 @@ def poll_commands():
             if cmd_type == "ESP_COMMAND":
                 cmd_list = payload.get("cmd")
                 target_url = payload.get("target_url")
+                
+                logger.info(f"[ESP_COMMAND RECEIVED]")
+                logger.info(f"  - Command ID: {cmd.get('id')}")
+                logger.info(f"  - Payload: {json.dumps(payload)}")
+                
                 if not cmd_list:
                     status = "failed"
                     message = "Missing cmd payload"
+                    logger.error(f"[ESP_COMMAND] ❌ FAILED: Missing cmd in payload")
                 else:
+                    logger.info(f"[ESP_COMMAND] Found command array: {cmd_list}")
                     ok, resp_msg = send_esp_command(cmd_list, target_url)
                     status = "executed" if ok else "failed"
                     message = resp_msg
+                    logger.info(f"[ESP_COMMAND] Result: {status} - {message}")
             else:
                 message = f"Skipped unsupported command: {cmd_type}"
 
