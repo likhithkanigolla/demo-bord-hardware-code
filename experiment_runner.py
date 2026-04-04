@@ -194,10 +194,19 @@ class E1CandidateSelectionExperiment:
                 if success:
                     successes += 1
                 
+                # Extract injected temperature from fault_injected sensor readings
+                injected_temp = None
+                for phase, sensors in trial_sensor_readings:
+                    if phase == 'fault_injected' and sensors:
+                        # Sensor dict should have temperature info
+                        injected_temp = sensors.get('injected_temp') or sensors.get('current_temperature') or (state['current_temperature'] + 5.0)
+                        break
+                
                 self.results['trials'].append({
                     'trial': trial + 1,
                     'timestamp': datetime.now().isoformat(),
-                    'initial_temperature': state['current_temperature'],
+                    'initial_temp': state['current_temperature'],
+                    'injected_temp': injected_temp,
                     'final_temperature': final_state['current_temperature'],
                     'fan_speed': decision.get('fan_speed') if decision else state['fan_speed'],
                     'success': success,
@@ -210,10 +219,19 @@ class E1CandidateSelectionExperiment:
                 
             except Exception as e:
                 logger.error(f"[E1] Trial {trial+1} failed: {e}")
+                
+                # Extract injected temperature from sensor readings if available
+                injected_temp = None
+                for phase, sensors in trial_sensor_readings:
+                    if phase == 'fault_injected' and sensors:
+                        injected_temp = sensors.get('injected_temp') or sensors.get('current_temperature')
+                        break
+                
                 self.results['trials'].append({
                     'trial': trial + 1,
                     'timestamp': datetime.now().isoformat(),
-                    'initial_temperature': state['current_temperature'] if 'state' in locals() else None,
+                    'initial_temp': state['current_temperature'] if 'state' in locals() else None,
+                    'injected_temp': injected_temp,
                     'final_temperature': state['current_temperature'] if 'state' in locals() else None,
                     'fan_speed': state['fan_speed'] if 'state' in locals() else 0.0,
                     'success': False,

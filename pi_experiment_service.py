@@ -234,6 +234,8 @@ def _send_results_to_backend(execution_id: str, experiment_type: str, results: d
             'timestamp': datetime.now().isoformat()
         }
         
+        logger.info(f"[{execution_id}] Payload trials count: {len(payload['trials'])}")
+        logger.info(f"[{execution_id}] Payload summary: {payload['summary']}")
         logger.info(f"[{execution_id}] Sending results to backend: {BACKEND_RESULTS_ENDPOINT}")
         
         response = requests.post(BACKEND_RESULTS_ENDPOINT, json=payload, timeout=10)
@@ -270,6 +272,8 @@ def _run_e1_experiment(execution_id: str, state: ExperimentState, req: Experimen
         state.current_message = COMPLETION_MESSAGE
         
         logger.info(f"[{execution_id}] E1 completed with {state.trials_completed} trials")
+        logger.info(f"[{execution_id}] Trials to send: {state.results['trials']}")
+        logger.info(f"[{execution_id}] Summary to send: {state.results['summary']}")
         
         # Send results back to backend
         _send_results_to_backend(execution_id, "E1", state.results)
