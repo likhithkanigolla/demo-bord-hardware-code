@@ -36,6 +36,10 @@ cd "$SCRIPT_DIR"
 cleanup() {
     echo ""
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Shutting down services..."
+    if [ -n "$AGENT_LOG_TAIL_PID" ] && ps -p $AGENT_LOG_TAIL_PID > /dev/null 2>&1; then
+        echo "Stopping Agent log stream (PID: $AGENT_LOG_TAIL_PID)..."
+        kill $AGENT_LOG_TAIL_PID 2>/dev/null || true
+    fi
     if [ -n "$AGENT_PID" ] && ps -p $AGENT_PID > /dev/null 2>&1; then
         echo "Stopping Agent (PID: $AGENT_PID)..."
         kill $AGENT_PID 2>/dev/null || true
@@ -117,6 +121,16 @@ start_services() {
     AGENT_PID=$!
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Agent PID: $AGENT_PID (logs: ${SCRIPT_DIR}/logs/pi_agent.log)"
 
+    # Stream agent logs to this terminal so Pi dispatch evidence is visible live.
+    if [ "${STREAM_AGENT_LOGS:-1}" = "1" ]; then
+        if [ -n "$AGENT_LOG_TAIL_PID" ] && ps -p $AGENT_LOG_TAIL_PID > /dev/null 2>&1; then
+            kill $AGENT_LOG_TAIL_PID 2>/dev/null || true
+        fi
+        tail -n 0 -F "${SCRIPT_DIR}/logs/pi_agent.log" &
+        AGENT_LOG_TAIL_PID=$!
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Streaming agent logs to console (PID: $AGENT_LOG_TAIL_PID)"
+    fi
+
     sleep 2  # Give agent time to initialize
 
     # Run service with logging
@@ -126,6 +140,12 @@ start_services() {
 
 stop_services() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Stopping services..."
+    if [ -n "$AGENT_LOG_TAIL_PID" ] && ps -p $AGENT_LOG_TAIL_PID > /dev/null 2>&1; then
+        echo "Stopping Agent log stream (PID: $AGENT_LOG_TAIL_PID)..."
+        kill $AGENT_LOG_TAIL_PID 2>/dev/null || true
+        sleep 1
+    fi
+    AGENT_LOG_TAIL_PID=""
     if [ -n "$AGENT_PID" ] && ps -p $AGENT_PID > /dev/null 2>&1; then
         echo "Stopping Agent (PID: $AGENT_PID)..."
         kill $AGENT_PID 2>/dev/null || true
