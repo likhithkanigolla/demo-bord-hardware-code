@@ -72,11 +72,13 @@ last_sensor_config_fetch = 0
 CONFIG_FETCH_INTERVAL = 300  # Refresh config every 5 minutes
 
 ESP_SEND_INTERVAL = 5  # 🔥 send every 4 sec
+LOCAL_ESP_QUEUE_ENABLED = os.getenv("LOCAL_ESP_QUEUE_ENABLED", "0") == "1"
 
 logger.info(f"CONFIG: SENSOR_INTERVAL = {SENSOR_INTERVAL_CONFIG}s")
 logger.info(f"CONFIG: HEARTBEAT_INTERVAL = {HEARTBEAT_INTERVAL_SECONDS}s")
 logger.info(f"CONFIG: COMMAND_POLL_INTERVAL = {COMMAND_POLL_SECONDS}s")
 logger.info(f"CONFIG: CONFIG_FETCH_INTERVAL = {CONFIG_FETCH_INTERVAL}s")
+logger.info(f"CONFIG: LOCAL_ESP_QUEUE_ENABLED = {LOCAL_ESP_QUEUE_ENABLED}")
 
 
 # ================= GPIO =================
@@ -313,11 +315,13 @@ def post_sensor_data():
     
     logger.info("")
 
-    # -------- ADD TO ESP QUEUE --------
-    esp_queue.append([1 if readings["gas"] else 0, 0, 0, 0, 0, 0, [0,0,0], 0])
-    esp_queue.append([0, 1 if readings["temperature"] else 0, 0, 0, 0, 0, [0,0,0], 0])
-    esp_queue.append([0, 0, 1 if readings["lux"] else 0, 0, 0, 0, [0,0,0], 0])
-    esp_queue.append([0, 0, 0, readings["pir"], 0, 0, [0,0,0], 0])
+    # Autonomous local ESP queue is disabled by default.
+    # Backend -> Pi polled commands remain the primary execution path.
+    if LOCAL_ESP_QUEUE_ENABLED:
+        esp_queue.append([1 if readings["gas"] else 0, 0, 0, 0, 0, 0, [0,0,0], 0])
+        esp_queue.append([0, 1 if readings["temperature"] else 0, 0, 0, 0, 0, [0,0,0], 0])
+        esp_queue.append([0, 0, 1 if readings["lux"] else 0, 0, 0, 0, [0,0,0], 0])
+        esp_queue.append([0, 0, 0, readings["pir"], 0, 0, [0,0,0], 0])
 
 
 def fetch_sensor_config():
@@ -537,8 +541,8 @@ def main():
                 poll_commands()
                 next_cmd = now + COMMAND_POLL_SECONDS
 
-            # 🔥 ESP SEND EVERY 2 SEC
-            if now - last_esp_send >= ESP_SEND_INTERVAL:
+            # Optional local autonomous ESP send path (disabled by default).
+            if LOCAL_ESP_QUEUE_ENABLED and now - last_esp_send >= ESP_SEND_INTERVAL:
                 if len(esp_queue) > 0:
                     cmd = esp_queue.pop(0)
                     logger.debug(f"[ESP] Sending queued command")
