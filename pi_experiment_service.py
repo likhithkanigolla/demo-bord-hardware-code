@@ -28,13 +28,8 @@ from enum import Enum
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from experiment_runner import (
-    E1CandidateSelectionExperiment,
-    E2AccuracyImprovementExperiment,
-    E3LearningCapabilityExperiment,
-    E4ProactiveControlExperiment,
-    E5CostOptimizationExperiment
-)
+# Use refactored hybrid architecture
+from experiment_runner_refactored import create_experiment_runner
 
 # Configure logging
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -258,14 +253,14 @@ def _run_e1_experiment(execution_id: str, state: ExperimentState, req: Experimen
         state.trials_total = req.trials
         logger.info(f"[{execution_id}] Starting E1 with {req.trials} trials")
         
-        experiment = E1CandidateSelectionExperiment(trials=req.trials)
-        
-        # Run experiment (this is blocking, so it needs to be handled carefully)
-        experiment.run()
+        # Use refactored hybrid architecture
+        runner = create_experiment_runner('E1', trials=req.trials)
+        results = runner.run()
         
         state.results = {
-            'trials': experiment.results.get('trials', []),
-            'summary': experiment.results.get('summary', {})
+            'trials': results.get('trials', []),
+            'summary': results.get('summary', {}),
+            'experiment_specific': results.get('experiment_specific', {})
         }
         state.trials_completed = len(state.results['trials'])
         state.status = "completed"
@@ -291,12 +286,14 @@ def _run_e2_experiment(execution_id: str, state: ExperimentState, req: Experimen
         state.trials_total = req.trials
         logger.info(f"[{execution_id}] Starting E2 with {req.trials} trials")
         
-        experiment = E2AccuracyImprovementExperiment(trials=req.trials)
-        experiment.run()
+        # Use refactored hybrid architecture
+        runner = create_experiment_runner('E2', trials=req.trials)
+        results = runner.run()
         
         state.results = {
-            'trials': experiment.results.get('trials', []),
-            'summary': experiment.results.get('summary', {})
+            'trials': results.get('trials', []),
+            'summary': results.get('summary', {}),
+            'experiment_specific': results.get('experiment_specific', {})
         }
         state.trials_completed = len(state.results['trials'])
         state.status = "completed"
@@ -319,12 +316,14 @@ def _run_e3_experiment(execution_id: str, state: ExperimentState, req: Experimen
         state.trials_total = req.trials
         logger.info(f"[{execution_id}] Starting E3 with {req.trials} trials")
         
-        experiment = E3LearningCapabilityExperiment(trials=req.trials)
-        experiment.run()
+        # Use refactored hybrid architecture
+        runner = create_experiment_runner('E3', trials=req.trials)
+        results = runner.run()
         
         state.results = {
-            'trials': experiment.results.get('trials', []),
-            'summary': experiment.results.get('summary', {})
+            'trials': results.get('trials', []),
+            'summary': results.get('summary', {}),
+            'experiment_specific': results.get('experiment_specific', {})
         }
         state.trials_completed = len(state.results['trials'])
         state.status = "completed"
@@ -347,12 +346,14 @@ def _run_e4_experiment(execution_id: str, state: ExperimentState, req: Experimen
         state.trials_total = req.trials
         logger.info(f"[{execution_id}] Starting E4 with {req.trials} trials")
         
-        experiment = E4ProactiveControlExperiment(trials=req.trials)
-        experiment.run()
+        # Use refactored hybrid architecture
+        runner = create_experiment_runner('E4', trials=req.trials)
+        results = runner.run()
         
         state.results = {
-            'trials': experiment.results.get('trials', []),
-            'summary': experiment.results.get('summary', {})
+            'trials': results.get('trials', []),
+            'summary': results.get('summary', {}),
+            'experiment_specific': results.get('experiment_specific', {})
         }
         state.trials_completed = len(state.results['trials'])
         state.status = "completed"
@@ -375,12 +376,14 @@ def _run_e5_experiment(execution_id: str, state: ExperimentState, req: Experimen
         state.trials_total = req.trials
         logger.info(f"[{execution_id}] Starting E5 with {req.trials} trials")
         
-        experiment = E5CostOptimizationExperiment(trials=req.trials)
-        experiment.run()
+        # Use refactored hybrid architecture
+        runner = create_experiment_runner('E5', trials=req.trials)
+        results = runner.run()
         
         state.results = {
-            'trials': experiment.results.get('trials', []),
-            'summary': experiment.results.get('summary', {})
+            'trials': results.get('trials', []),
+            'summary': results.get('summary', {}),
+            'experiment_specific': results.get('experiment_specific', {})
         }
         state.trials_completed = len(state.results['trials'])
         state.status = "completed"
@@ -390,12 +393,6 @@ def _run_e5_experiment(execution_id: str, state: ExperimentState, req: Experimen
         
         # Send results back to backend
         _send_results_to_backend(execution_id, "E5", state.results)
-    
-    except Exception as e:
-        logger.error(f"[{execution_id}] E5 failed: {e}", exc_info=True)
-        state.status = "failed"
-        
-        logger.info(f"[{execution_id}] E5 completed with {state.trials_completed} trials")
     
     except Exception as e:
         logger.error(f"[{execution_id}] E5 failed: {e}", exc_info=True)
