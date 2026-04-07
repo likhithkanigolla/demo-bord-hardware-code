@@ -62,12 +62,12 @@ if not ESP_URL:
 
 logger.info(f"CONFIG: ESP_URL = {ESP_URL}")
 
-SENSOR_INTERVAL_SECONDS = 45
+SENSOR_INTERVAL_SECONDS = 10
 HEARTBEAT_INTERVAL_SECONDS = 15
 COMMAND_POLL_SECONDS = 5
 
 # Configurable sensor interval (can be updated via API)
-SENSOR_INTERVAL_CONFIG = float(os.getenv("SENSOR_INTERVAL_SECONDS", "45"))
+SENSOR_INTERVAL_CONFIG = float(os.getenv("SENSOR_INTERVAL_SECONDS", "10"))
 last_sensor_config_fetch = 0
 CONFIG_FETCH_INTERVAL = 300  # Refresh config every 5 minutes
 
