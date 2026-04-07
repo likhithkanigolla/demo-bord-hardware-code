@@ -303,6 +303,22 @@ def post_sensor_data():
         if r.status_code == 200:
             logger.info(f"[SUCCESS] ✓ Sensor data posted successfully")
             logger.info(f"    T={fmt(readings['temperature'])}°C, Lux={fmt(readings['lux'])}, Gas={fmt(readings['gas'])}ppm")
+
+            try:
+                response_payload = r.json()
+            except Exception:
+                response_payload = {}
+
+            adaptation_commands = response_payload.get("adaptation_commands", []) if isinstance(response_payload, dict) else []
+            if adaptation_commands:
+                logger.info(f"[ADAPTATION] Backend queued {len(adaptation_commands)} command(s)")
+                for cmd in adaptation_commands[:3]:
+                    logger.info(
+                        f"    -> id={cmd.get('id')} type={cmd.get('command')} inserted={cmd.get('inserted')} "
+                        f"dupe_skips={cmd.get('duplicate_skip_count', 0)}"
+                    )
+            else:
+                logger.info("[ADAPTATION] No adaptation command returned for this sensor payload")
         else:
             logger.warning(f"[FAILURE] ✗ POST returned HTTP {r.status_code}")
             logger.warning(f"[RESPONSE] {r.text[:200]}")
