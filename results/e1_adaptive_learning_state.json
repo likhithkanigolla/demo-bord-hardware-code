@@ -1,0 +1,86 @@
+{
+  "sensor_stats": {
+    "temperature": {
+      "mean": 24.936,
+      "std": 2.406934913951767
+    },
+    "lux": {
+      "mean": 264.8,
+      "std": 83.01062100719402
+    },
+    "pir": {
+      "mean": 0.322,
+      "std": 0.4411289153977554
+    }
+  },
+  "risk_weights": {
+    "temperature": 0.38,
+    "lux": 0.34,
+    "pir": 0.28
+  },
+  "action_models": {
+    "C1": {
+      "name": "Adaptive Ventilation",
+      "controls": {
+        "fan_speed": 0.8470154253081034,
+        "buzzer_enabled": false,
+        "led_level": 0.27549668689560264,
+        "sampling_interval_seconds": 9.977574112097289
+      },
+      "effect": {
+        "temperature": 0.6541751977855798,
+        "lux": 0.6966869196058927,
+        "pir": 0.5798857142857142
+      },
+      "count": 1
+    },
+    "C2": {
+      "name": "Occupancy Alert",
+      "controls": {
+        "fan_speed": 0.2,
+        "buzzer_enabled": true,
+        "led_level": 0.2,
+        "sampling_interval_seconds": 10.0
+      },
+      "effect": {
+        "temperature": 0.22,
+        "lux": 0.1,
+        "pir": 0.35
+      },
+      "count": 0
+    },
+    "C3": {
+      "name": "Balanced Comfort",
+      "controls": {
+        "fan_speed": 0.7,
+        "buzzer_enabled": true,
+        "led_level": 0.5,
+        "sampling_interval_seconds": 10.0
+      },
+      "effect": {
+        "temperature": 0.48,
+        "lux": 0.32,
+        "pir": 0.32
+      },
+      "count": 0
+    },
+    "C4": {
+      "name": "Efficiency Probe",
+      "controls": {
+        "fan_speed": 0.35,
+        "buzzer_enabled": false,
+        "led_level": 0.65,
+        "sampling_interval_seconds": 10.0
+      },
+      "effect": {
+        "temperature": 0.3,
+        "lux": 0.42,
+        "pir": 0.1
+      },
+      "count": 0
+    }
+  },
+  "learning_rate": 0.18,
+  "exploration_rate": 0.2167,
+  "updated_at": "2026-04-08T00:26:00.536349"
+}

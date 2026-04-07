@@ -17,6 +17,7 @@ Result structure ensures:
 import json
 import time
 import math
+import random
 import requests
 import logging
 import uuid
@@ -403,287 +404,489 @@ class BaseExperimentRunner(ABC):
 
 class E1CandidateSelectionRunner(BaseExperimentRunner):
     """
-    RQ1: Can the DT choose the right action without being told which actions are good?
-    
-    SETUP: Gas increase is injected. System generates 4 candidates:
-    - C1: Fan only (effective for gas reduction)
-    - C2: Buzzer only (safety action, doesn't reduce gas)
-    - C3: Fan + Buzzer (combined approach)
-    - C4: Reduced sampling (energy-saving but wrong for safety)
-    
-    The DT simulates all four and selects the best ONE based on effectiveness.
-    
-    MEASURES:
-    - Does DT correctly reject buzzer-only & reduced-sampling?
-    - Does selected candidate resolve the gas fault?
-    - What is the time from fault detection to action selection?
-    - Why did DT pick that candidate (verifiable by inspecting scores)?
-    
-    This validates the foundational value of simulation in self-adaptive systems:
-    The DT makes informed selection WITHOUT touching the physical system.
+    RQ1: Can the DT learn context-aware actions without hardcoded good/bad labels?
+
+    E1 now models environment quality from lux, PIR, and temperature.
+    Candidate actions are not pre-labeled as "correct"; each action has a learned
+    response model that is updated online after every trial based on measured outcome.
+
+    The runner keeps backward-compatible fields (for existing dashboard widgets)
+    while internally optimizing a learned environmental risk signal.
     """
     
     EXPERIMENT_TYPE = "E1"
-    DESCRIPTION = "Candidate Selection - Can DT choose right action without being told?"
+    DESCRIPTION = "Adaptive Candidate Selection - Learning from lux/PIR/temperature"
     
-    # Gas threshold for fault detection (ppm units)
-    GAS_FAULT_THRESHOLD = 200.0
+    RISK_THRESHOLD_DEFAULT = 0.62
+    SAMPLING_INTERVAL_DEFAULT_SECONDS = 10.0
     
     def __init__(self, trials: int = 3):
         super().__init__(trials)
-        self.selection_accuracy_scores = []  # Track correct selections
-        self.candidate_scores_per_trial = []  # Track all candidate scores for analysis
-        self.execution_times = []  # Time from fault to selection
-        self.gas_sensor_mode = 'direct'  # direct | proxy_temperature_lux
-        self._recent_gas_samples: List[float] = []
-        self._proxy_mode_logged = False
+        self.selection_accuracy_scores: List[float] = []
+        self.candidate_scores_per_trial: List[List[Dict[str, Any]]] = []
+        self.execution_times: List[float] = []
+        self.risk_reduction_scores: List[float] = []
 
-    def _update_gas_sensor_mode(self, reading: Dict) -> None:
-        """Detect stuck/unusable gas sensors and switch to proxy mode."""
-        raw_gas = reading.get('gas')
-        gas_value = None
+        sample_interval = float(os.getenv("E1_SAMPLING_INTERVAL_SECONDS", str(self.SAMPLING_INTERVAL_DEFAULT_SECONDS)))
+        self.sample_interval_seconds = max(6.0, min(14.0, sample_interval))
+
+        risk_threshold = float(os.getenv("E1_RISK_THRESHOLD", str(self.RISK_THRESHOLD_DEFAULT)))
+        self.risk_threshold = max(0.35, min(0.90, risk_threshold))
+
+        self.learning_state_path = Path(__file__).parent / "results" / "e1_adaptive_learning_state.json"
+        self.learning_state = self._load_learning_state()
+
+        self._last_baseline_context: Dict[str, Any] = {}
+        self._last_fault_scenario: Dict[str, Any] = {}
+        self._pending_learning_sample: Optional[Dict[str, Any]] = None
+
+    def _clamp(self, value: float, low: float, high: float) -> float:
+        return max(low, min(high, value))
+
+    def _default_learning_state(self) -> Dict[str, Any]:
+        return {
+            "sensor_stats": {
+                "temperature": {"mean": 25.0, "std": 2.5},
+                "lux": {"mean": 260.0, "std": 85.0},
+                "pir": {"mean": 0.35, "std": 0.45},
+            },
+            "risk_weights": {
+                "temperature": 0.38,
+                "lux": 0.34,
+                "pir": 0.28,
+            },
+            "action_models": {
+                "C1": {
+                    "name": "Adaptive Ventilation",
+                    "controls": {
+                        "fan_speed": 0.85,
+                        "buzzer_enabled": False,
+                        "led_level": 0.25,
+                        "sampling_interval_seconds": 10.0,
+                    },
+                    "effect": {
+                        "temperature": 0.55,
+                        "lux": 0.12,
+                        "pir": 0.08,
+                    },
+                    "count": 0,
+                },
+                "C2": {
+                    "name": "Occupancy Alert",
+                    "controls": {
+                        "fan_speed": 0.20,
+                        "buzzer_enabled": True,
+                        "led_level": 0.20,
+                        "sampling_interval_seconds": 10.0,
+                    },
+                    "effect": {
+                        "temperature": 0.22,
+                        "lux": 0.10,
+                        "pir": 0.35,
+                    },
+                    "count": 0,
+                },
+                "C3": {
+                    "name": "Balanced Comfort",
+                    "controls": {
+                        "fan_speed": 0.70,
+                        "buzzer_enabled": True,
+                        "led_level": 0.50,
+                        "sampling_interval_seconds": 10.0,
+                    },
+                    "effect": {
+                        "temperature": 0.48,
+                        "lux": 0.32,
+                        "pir": 0.32,
+                    },
+                    "count": 0,
+                },
+                "C4": {
+                    "name": "Efficiency Probe",
+                    "controls": {
+                        "fan_speed": 0.35,
+                        "buzzer_enabled": False,
+                        "led_level": 0.65,
+                        "sampling_interval_seconds": 10.0,
+                    },
+                    "effect": {
+                        "temperature": 0.30,
+                        "lux": 0.42,
+                        "pir": 0.10,
+                    },
+                    "count": 0,
+                },
+            },
+            "learning_rate": 0.18,
+            "exploration_rate": 0.22,
+            "updated_at": datetime.now().isoformat(),
+        }
+
+    def _merge_action_model(self, default_action: Dict[str, Any], loaded_action: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            **default_action,
+            **loaded_action,
+            "controls": {
+                **default_action.get("controls", {}),
+                **loaded_action.get("controls", {}),
+            },
+            "effect": {
+                **default_action.get("effect", {}),
+                **loaded_action.get("effect", {}),
+            },
+        }
+
+    def _merge_learning_state(self, defaults: Dict[str, Any], loaded: Dict[str, Any]) -> Dict[str, Any]:
+        defaults.update({k: v for k, v in loaded.items() if k in defaults})
+        loaded_actions = loaded.get("action_models", {})
+        if not isinstance(loaded_actions, dict):
+            return defaults
+
+        for action_id, default_action in defaults["action_models"].items():
+            loaded_action = loaded_actions.get(action_id)
+            if isinstance(loaded_action, dict):
+                defaults["action_models"][action_id] = self._merge_action_model(default_action, loaded_action)
+        return defaults
+
+    def _load_learning_state(self) -> Dict[str, Any]:
+        defaults: Dict[str, Any] = self._default_learning_state()
+
         try:
-            if raw_gas is not None:
-                gas_value = float(raw_gas)
-        except (TypeError, ValueError):
-            gas_value = None
+            if self.learning_state_path.exists():
+                loaded = json.loads(self.learning_state_path.read_text())
+                if isinstance(loaded, dict):
+                    defaults = self._merge_learning_state(defaults, loaded)
+        except Exception as exc:
+            logger.warning(f"[E1] Failed to load adaptive state, using defaults: {exc}")
 
-        if gas_value is not None:
-            self._recent_gas_samples.append(gas_value)
-            if len(self._recent_gas_samples) > 8:
-                self._recent_gas_samples.pop(0)
+        return defaults
 
-        if gas_value is None:
-            self.gas_sensor_mode = 'proxy_temperature_lux'
-        elif abs(gas_value - 400.0) <= 0.5:
-            # Common board failure mode observed in field logs.
-            self.gas_sensor_mode = 'proxy_temperature_lux'
-        elif len(self._recent_gas_samples) >= 4:
-            sample_spread = max(self._recent_gas_samples) - min(self._recent_gas_samples)
-            sample_avg = safe_mean(self._recent_gas_samples)
-            # If gas sits around ~400 with almost no variation, treat it as stuck.
-            if sample_spread <= 1.0 and sample_avg >= 350.0:
-                self.gas_sensor_mode = 'proxy_temperature_lux'
-            else:
-                self.gas_sensor_mode = 'direct'
-
-        if self.gas_sensor_mode != 'direct' and not self._proxy_mode_logged:
-            logger.warning(
-                "  [E1] Gas sensor appears stuck/unreliable. Switching to proxy mode "
-                "(temperature/lux-derived safety signal)."
-            )
-            self._proxy_mode_logged = True
-
-    def _proxy_gas_from_alt_sensors(self, reading: Dict) -> float:
-        """Estimate a gas-like safety signal from other sensors when gas is unusable."""
-        temp = float(reading.get('temperature', 25.0))
-        raw_lux = reading.get('lux')
+    def _persist_learning_state(self) -> None:
         try:
-            lux = float(raw_lux) if raw_lux is not None else 200.0
+            self.learning_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.learning_state["updated_at"] = datetime.now().isoformat()
+            self.learning_state_path.write_text(json.dumps(self.learning_state, indent=2))
+        except Exception as exc:
+            logger.warning(f"[E1] Failed to persist adaptive state: {exc}")
+
+    def _sensor_value(self, reading: Dict[str, Any], key: str, default: float) -> float:
+        value = reading.get(key)
+        try:
+            if value is None:
+                return float(default)
+            return float(value)
         except (TypeError, ValueError):
-            lux = 200.0
+            return float(default)
 
-        # Higher temperature / lower lux can indicate degraded environment quality.
-        proxy = 60.0 + max(0.0, (temp - 20.0) * 6.0) + max(0.0, (250.0 - lux) / 8.0)
-        return min(260.0, max(60.0, proxy))
+    def _build_context(self, reading: Dict[str, Any], baseline_hint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        baseline_hint = baseline_hint or {}
+        stats = self.learning_state["sensor_stats"]
 
-    def _effective_gas(self, reading: Dict, fallback_if_proxy: Optional[float] = None) -> float:
-        """Return gas reading from real sensor or proxy mode depending on sensor health."""
-        self._update_gas_sensor_mode(reading)
+        temp_default = baseline_hint.get("temperature", stats["temperature"]["mean"])
+        lux_default = baseline_hint.get("lux", stats["lux"]["mean"])
+        pir_default = baseline_hint.get("pir", stats["pir"]["mean"])
 
-        if self.gas_sensor_mode == 'direct':
-            try:
-                return float(reading.get('gas', 100.0))
-            except (TypeError, ValueError):
-                pass
+        temperature = self._sensor_value(reading, "temperature", temp_default)
+        lux = self._sensor_value(reading, "lux", lux_default)
+        pir = 1.0 if self._sensor_value(reading, "pir", pir_default) >= 0.5 else 0.0
 
-        if fallback_if_proxy is not None:
-            return float(fallback_if_proxy)
-        return self._proxy_gas_from_alt_sensors(reading)
+        temp_std = max(0.5, float(stats["temperature"].get("std", 2.5)))
+        lux_std = max(15.0, float(stats["lux"].get("std", 85.0)))
+        pir_std = max(0.2, float(stats["pir"].get("std", 0.45)))
+
+        temp_stress = max(0.0, (temperature - float(stats["temperature"].get("mean", 25.0))) / temp_std)
+        lux_stress = max(0.0, (float(stats["lux"].get("mean", 260.0)) - lux) / lux_std)
+        pir_stress = max(0.0, (pir - float(stats["pir"].get("mean", 0.35))) / pir_std)
+
+        weights = self.learning_state.get("risk_weights", {})
+        raw_risk = (
+            float(weights.get("temperature", 0.38)) * temp_stress
+            + float(weights.get("lux", 0.34)) * lux_stress
+            + float(weights.get("pir", 0.28)) * pir_stress
+        )
+        risk_score = self._clamp(1.0 - math.exp(-raw_risk), 0.0, 1.0)
+        safety_signal = 60.0 + (risk_score * 260.0)
+
+        return {
+            "temperature": temperature,
+            "lux": max(0.0, lux),
+            "pir": pir,
+            "temp_stress": temp_stress,
+            "lux_stress": lux_stress,
+            "pir_stress": pir_stress,
+            "risk_score": risk_score,
+            "safety_signal": safety_signal,
+            "timestamp": time.time(),
+        }
+
+    def _update_sensor_stats(self, context: Dict[str, Any]) -> None:
+        stats = self.learning_state["sensor_stats"]
+        alpha = 0.08
+        min_std = {
+            "temperature": 0.5,
+            "lux": 15.0,
+            "pir": 0.2,
+        }
+
+        for sensor in ["temperature", "lux", "pir"]:
+            mean_prev = float(stats[sensor].get("mean", 0.0))
+            std_prev = max(min_std[sensor], float(stats[sensor].get("std", min_std[sensor])))
+            value = float(context.get(sensor, mean_prev))
+
+            mean_new = ((1.0 - alpha) * mean_prev) + (alpha * value)
+            var_prev = std_prev ** 2
+            var_new = ((1.0 - alpha) * var_prev) + (alpha * ((value - mean_new) ** 2))
+
+            stats[sensor]["mean"] = mean_new
+            stats[sensor]["std"] = max(min_std[sensor], math.sqrt(max(1e-6, var_new)))
+
+    def _generate_fault_scenario(self, baseline: Dict[str, Any]) -> Dict[str, Any]:
+        weights = self.learning_state.get("risk_weights", {})
+        focus_sensor = max(
+            ["temperature", "lux", "pir"],
+            key=lambda sensor: float(weights.get(sensor, 0.0)),
+        )
+
+        scenario = {
+            "scenario_id": f"SCN_{focus_sensor}_{int(time.time())}",
+            "focus_sensor": focus_sensor,
+            "temp_delta": 0.0,
+            "lux_delta": 0.0,
+            "force_motion": False,
+            "notes": "",
+        }
+
+        if focus_sensor == "temperature":
+            scenario["temp_delta"] = random.uniform(2.5, 4.5)
+            scenario["lux_delta"] = -random.uniform(20.0, 80.0)
+            scenario["force_motion"] = True
+            scenario["notes"] = "heat-dominant occupied disturbance"
+        elif focus_sensor == "lux":
+            scenario["temp_delta"] = random.uniform(0.6, 2.0)
+            scenario["lux_delta"] = -random.uniform(120.0, 240.0)
+            scenario["force_motion"] = bool(random.random() > 0.35)
+            scenario["notes"] = "visibility drop disturbance"
+        else:
+            scenario["temp_delta"] = random.uniform(1.0, 3.0)
+            scenario["lux_delta"] = -random.uniform(40.0, 120.0)
+            scenario["force_motion"] = True
+            scenario["notes"] = "occupancy-driven disturbance"
+
+        baseline_risk = float(baseline.get("risk_score", 0.25))
+        severity = self._clamp(0.55 + baseline_risk, 0.55, 1.25)
+        scenario["temp_delta"] *= severity
+        scenario["lux_delta"] *= severity
+
+        return scenario
     
     def baseline_phase(self, trial_number: int) -> Dict:
-        """PHASE 1: Establish healthy baseline gas level."""
-        baseline = read_sensors()
-        gas_baseline = self._effective_gas(baseline)
-        
-        logger.info(f"  [BASELINE] Gas={gas_baseline:.0f}ppm, Temp={baseline.get('temperature', 0):.1f}°C")
-        
-        send_sensor_data_to_backend(baseline, {
+        """PHASE 1: Capture baseline context from lux/PIR/temperature."""
+        baseline_reading = read_sensors()
+        context = self._build_context(baseline_reading)
+        self._last_baseline_context = context
+
+        logger.info(
+            "  [BASELINE] "
+            f"Temp={context['temperature']:.2f}°C, Lux={context['lux']:.1f}, PIR={context['pir']:.0f}, "
+            f"Risk={context['risk_score']:.3f}, Sample={self.sample_interval_seconds:.0f}s"
+        )
+
+        send_sensor_data_to_backend(
+            baseline_reading,
+            {
             'trial': trial_number,
             'phase': 'baseline',
             'experiment': self.EXPERIMENT_TYPE,
-            'event': 'healthy_state',
-            'gas_sensor_mode': self.gas_sensor_mode,
-        })
-        
+            'event': 'baseline_context_captured',
+            'risk_score': context['risk_score'],
+            'sampling_interval_seconds': self.sample_interval_seconds,
+            },
+        )
+
         return {
-            'gas_level': gas_baseline,
-            'temperature': baseline.get('temperature', 25.0),
-            'humidity': baseline.get('humidity', 60.0),
+            'temperature': context['temperature'],
+            'lux': context['lux'],
+            'pir': context['pir'],
+            'risk_score': context['risk_score'],
+            'gas_level': context['safety_signal'],
+            'safety_signal': context['safety_signal'],
+            'humidity': baseline_reading.get('humidity', 60.0),
             'fan_speed': 0.0,
             'buzzer_enabled': False,
-            'sampling_rate': 'normal',
-            'gas_sensor_mode': self.gas_sensor_mode,
+            'led_level': 0.0,
+            'sampling_rate': f"{int(self.sample_interval_seconds)}s",
+            'sampling_interval_seconds': self.sample_interval_seconds,
             'timestamp': time.time()
         }
     
     def fault_injection_phase(self, trial_number: int, baseline: Dict) -> Dict:
-        """PHASE 2: Inject gas fault (increase to unsafe level)."""
-        baseline_gas = baseline['gas_level']
-        # Inject enough gas to exceed threshold
-        injected_gas = baseline_gas + 150.0  # Significant increase
-        
-        logger.info(f"  [FAULT] Injecting gas: {baseline_gas:.0f}ppm → {injected_gas:.0f}ppm (UNSAFE)")
-        
-        # Simulate sensor reading after fault injection
-        time.sleep(1)
-        fault_time = time.time()
-        
-        fault_readings = read_sensors()
-        # In proxy mode, keep injected fault level because gas sensor cannot observe the event.
-        actual_gas = self._effective_gas(
-            fault_readings,
-            fallback_if_proxy=injected_gas,
+        """PHASE 2: Inject synthetic multi-sensor disturbance based on learned focus."""
+        scenario = self._generate_fault_scenario(baseline)
+        self._last_fault_scenario = scenario
+
+        logger.info(
+            "  [FAULT] Injecting scenario "
+            f"{scenario['scenario_id']} ({scenario['notes']})"
         )
-        is_unsafe = actual_gas > self.GAS_FAULT_THRESHOLD
-        
-        send_sensor_data_to_backend(fault_readings, {
+
+        time.sleep(min(3.0, self.sample_interval_seconds / 3.0))
+        fault_time = time.time()
+
+        live_context = self._build_context(read_sensors(), self._last_baseline_context)
+        stressed_context = self._build_context(
+            {
+                "temperature": live_context["temperature"] + float(scenario["temp_delta"]),
+                "lux": max(5.0, live_context["lux"] + float(scenario["lux_delta"])),
+                "pir": 1.0 if scenario["force_motion"] else live_context["pir"],
+            },
+            self._last_baseline_context,
+        )
+
+        is_fault = stressed_context["risk_score"] >= self.risk_threshold
+
+        send_sensor_data_to_backend(
+            {
+                "temperature": stressed_context["temperature"],
+                "lux": stressed_context["lux"],
+                "pir": stressed_context["pir"],
+                "gas": None,
+            },
+            {
             'trial': trial_number,
             'phase': 'fault_detected',
             'experiment': self.EXPERIMENT_TYPE,
-            'event': 'unsafe_gas_level',
-            'gas_level': actual_gas,
-            'threshold_exceeded': is_unsafe,
-            'gas_sensor_mode': self.gas_sensor_mode,
-        })
-        
+            'event': 'multi_sensor_risk_fault',
+            'scenario': scenario,
+            'risk_score': stressed_context['risk_score'],
+            'threshold_exceeded': is_fault,
+            },
+        )
+
         return {
-            'gas_level': actual_gas,
-            'temperature': fault_readings.get('temperature', 25.0),
-            'humidity': fault_readings.get('humidity', 60.0),
+            'temperature': stressed_context['temperature'],
+            'lux': stressed_context['lux'],
+            'pir': stressed_context['pir'],
+            'risk_score': stressed_context['risk_score'],
+            'gas_level': stressed_context['safety_signal'],
+            'safety_signal': stressed_context['safety_signal'],
+            'humidity': 60.0,
             'fan_speed': 0.0,
             'buzzer_enabled': False,
-            'sampling_rate': 'normal',
-            'gas_sensor_mode': self.gas_sensor_mode,
+            'led_level': 0.0,
+            'sampling_rate': f"{int(self.sample_interval_seconds)}s",
+            'sampling_interval_seconds': self.sample_interval_seconds,
             'timestamp': fault_time,
-            'is_fault': True,
-            'fault_magnitude': actual_gas - baseline_gas
+            'is_fault': is_fault,
+            'fault_magnitude': stressed_context['risk_score'] - baseline.get('risk_score', 0.0),
+            'fault_scenario': scenario,
         }
     
     def adaptation_phase(self, trial_number: int, fault_state: Dict) -> Tuple[Optional[Dict], Dict]:
-        """
-        PHASE 3: Run MAPE cycle - Generate candidates, SIMULATE EACH via backend DT model, 
-        select best based on REAL predicted outcomes, execute on hardware, MEASURE ACTUAL effect.
-        """
+        """PHASE 3: Learn-aware candidate generation, simulation, selection, and execution."""
         adaptation_start = time.time()
-        
-        logger.info(f"  [MAPE] Entering MAPE cycle due to gas level {fault_state['gas_level']:.0f}ppm...")
-        
-        # MONITOR: Current system state (REAL DATA from sensors)
-        current_gas = fault_state['gas_level']
-        current_temp = fault_state['temperature']
-        
-        # ========= ANALYZE: Generate candidate actions =========
-        candidates = self._generate_candidates()
-        logger.info(f"  [ANALYZE] Generated {len(candidates)} candidate actions")
-        
-        # ========= SIMULATE: For EACH candidate, get predicted outcome via backend DT =========
+
+        logger.info(
+            f"  [MAPE] Fault risk={fault_state['risk_score']:.3f} "
+            f"(Temp={fault_state['temperature']:.1f}°C, Lux={fault_state.get('lux', 0):.1f}, PIR={fault_state.get('pir', 0):.0f})"
+        )
+
+        candidates = self._generate_candidates(fault_state)
+        logger.info(f"  [ANALYZE] Generated {len(candidates)} adaptive candidates")
+
         scored_candidates = []
         for candidate in candidates:
-            logger.info(f"    Simulating candidate {candidate['id']}: {candidate['name']}")
-            
-            # Call REAL backend DT model to simulate this candidate's effect
-            simulation_result = self._call_backend_dt_simulate(
-                candidate=candidate,
-                current_gas=current_gas,
-                current_temp=current_temp,
-                trial_number=trial_number
-            )
-            
-            if simulation_result:
+            simulation_result = self._simulate_candidate_effect(candidate, fault_state)
+            if simulation_result is not None:
                 scored_candidate = {
                     **candidate,
-                    'predicted_gas_after': simulation_result['predicted_gas_after'],
+                    'predicted_risk_after': simulation_result['predicted_risk_after'],
                     'predicted_temp_after': simulation_result['predicted_temp_after'],
+                    'predicted_lux_after': simulation_result['predicted_lux_after'],
+                    'predicted_pir_after': simulation_result['predicted_pir_after'],
                     'reasoning': simulation_result['reasoning'],
                     'impact_score': simulation_result['impact_score']
                 }
                 scored_candidates.append(scored_candidate)
-                
-                logger.info(f"      → Predicted gas: {current_gas:.0f}ppm → {simulation_result['predicted_gas_after']:.0f}ppm "
-                           f"(score={simulation_result['impact_score']:.4f})")
+
+                logger.info(
+                    "    Candidate "
+                    f"{candidate['id']} score={simulation_result['impact_score']:.4f} "
+                    f"risk {fault_state['risk_score']:.3f}→{simulation_result['predicted_risk_after']:.3f}"
+                )
             else:
-                logger.warning("      -> FAILED to simulate. Skipping candidate.")
-        
+                logger.warning(f"    Candidate {candidate['id']} simulation failed")
+
         if not scored_candidates:
-            logger.error("  [ERROR] No candidates could be simulated!")
+            logger.error("  [ERROR] No candidates could be simulated")
             return None, fault_state
-        
+
         self.candidate_scores_per_trial.append(scored_candidates)
-        
-        # ========= PLAN: Select best based on ACTUAL predicted outcomes =========
+
         best_candidate = max(scored_candidates, key=lambda x: x['impact_score'])
-        
-        logger.info(f"  [PLAN] Selected: {best_candidate['name']} "
-                   f"(predicted gas: {best_candidate['predicted_gas_after']:.0f}ppm, "
-                   f"impact_score={best_candidate['impact_score']:.4f})")
-        
-        # Check correctness: Best should be fan-based (C1 or C3) with actual gas reduction
-        is_correct = best_candidate['id'] in ['C1', 'C3']
-        will_resolve = best_candidate['predicted_gas_after'] < self.GAS_FAULT_THRESHOLD
-        self.selection_accuracy_scores.append(1.0 if is_correct and will_resolve else 0.0)
-        
-        if is_correct and will_resolve:
-            logger.info("  ✓ Correct selection (gas-reducing action with predicted resolution)")
-        else:
-            logger.warning("  ✗ INCORRECT selection (non-reducing or ineffective action)")
-        
-        # ========= EXECUTE: Apply selected action on REAL hardware =========
+
+        logger.info(
+            f"  [PLAN] Selected {best_candidate['id']} {best_candidate['name']} "
+            f"(pred risk after={best_candidate['predicted_risk_after']:.3f}, score={best_candidate['impact_score']:.4f})"
+        )
+
         logger.info("  [EXECUTE] Deploying selected action to real hardware via backend...")
         execution_time = time.time() - adaptation_start
         self.execution_times.append(execution_time)
-        
+
         esp_command = best_candidate['esp_command']
         command_executed, command_id = self._send_esp_command(esp_command, trial_number, best_candidate)
-        
-        # Wait for hardware to complete the action
-        time.sleep(8)
-        
-        # Read ACTUAL sensor values to measure REAL effect (not simulated)
-        adapted_reading = read_sensors()
-        if self.gas_sensor_mode == 'direct':
-            actual_gas_after_action = self._effective_gas(adapted_reading, fallback_if_proxy=current_gas)
-        else:
-            # Proxy mode: estimate improvement from prediction, modulated by observed cooling signal.
-            predicted_after = float(best_candidate['predicted_gas_after'])
-            predicted_reduction = max(0.0, current_gas - predicted_after)
-            temp_before = float(fault_state.get('temperature', current_temp))
-            temp_after = float(adapted_reading.get('temperature', temp_before))
-            temp_drop = max(0.0, temp_before - temp_after)
-            confidence = min(1.0, 0.60 + (temp_drop * 0.80))
-            proxy_reduction = predicted_reduction * confidence
-            actual_gas_after_action = max(50.0, current_gas - proxy_reduction)
 
-        actual_temp_after_action = adapted_reading.get('temperature', current_temp)
-        actual_gas_reduction = current_gas - actual_gas_after_action
-        
-        logger.info(f"  [MEASURED OUTCOME] Gas: {current_gas:.0f} → {actual_gas_after_action:.0f}ppm "
-                   f"(predicted: {best_candidate['predicted_gas_after']:.0f}ppm, "
-                   f"error: {abs(actual_gas_after_action - best_candidate['predicted_gas_after']):.1f}ppm)")
-        
-        send_sensor_data_to_backend(adapted_reading, {
+        applied_sampling_interval = max(6.0, min(14.0, float(best_candidate.get('sampling_interval_seconds', self.sample_interval_seconds))))
+        time.sleep(applied_sampling_interval)
+
+        measured_context = self._build_context(read_sensors(), self._last_baseline_context)
+        predicted_context = {
+            'temperature': best_candidate['predicted_temp_after'],
+            'lux': best_candidate['predicted_lux_after'],
+            'pir': best_candidate['predicted_pir_after'],
+            'risk_score': best_candidate['predicted_risk_after'],
+            'safety_signal': 60.0 + (best_candidate['predicted_risk_after'] * 260.0),
+        }
+
+        measured_risk_after = measured_context['risk_score']
+        predicted_risk_after = best_candidate['predicted_risk_after']
+        risk_error = abs(measured_risk_after - predicted_risk_after)
+        risk_reduction = max(0.0, fault_state['risk_score'] - measured_risk_after)
+        self.risk_reduction_scores.append(risk_reduction)
+
+        selection_correct = bool(
+            measured_risk_after < fault_state['risk_score']
+            and measured_risk_after <= self.risk_threshold
+        )
+        self.selection_accuracy_scores.append(1.0 if selection_correct else 0.0)
+
+        logger.info(
+            "  [MEASURED OUTCOME] "
+            f"Risk {fault_state['risk_score']:.3f}→{measured_risk_after:.3f} "
+            f"(pred {predicted_risk_after:.3f}, err {risk_error:.3f})"
+        )
+
+        send_sensor_data_to_backend(
+            {
+                'temperature': measured_context['temperature'],
+                'lux': measured_context['lux'],
+                'pir': measured_context['pir'],
+                'gas': None,
+            },
+            {
             'trial': trial_number,
             'phase': 'adapted',
             'experiment': self.EXPERIMENT_TYPE,
             'action_selected': best_candidate['id'],
             'action_name': best_candidate['name'],
-            'predicted_gas_after': best_candidate['predicted_gas_after'],
-            'actual_gas_after': actual_gas_after_action,
+            'predicted_risk_after': predicted_risk_after,
+            'actual_risk_after': measured_risk_after,
             'impact_score': best_candidate['impact_score'],
-            'command_id': command_id
-        })
-        
-        # Build decision with full reasoning BASED ON DT PREDICTIONS AND ACTUAL RESULTS
+            'command_id': command_id,
+            'sampling_interval_seconds': applied_sampling_interval,
+            },
+        )
+
         decision = {
             'action_id': best_candidate['id'],
             'action_name': best_candidate['name'],
@@ -692,83 +895,229 @@ class E1CandidateSelectionRunner(BaseExperimentRunner):
             'candidates_scores': [{
                 'id': c['id'],
                 'name': c['name'],
-                'predicted_gas_after': c['predicted_gas_after'],
+                'predicted_risk_after': c['predicted_risk_after'],
                 'score': c['impact_score'],
                 'reasoning': c['reasoning']
             } for c in scored_candidates],
             'selection_reasoning': best_candidate['reasoning'],
-            'selection_correct': is_correct,
-            'predicted_gas_after': best_candidate['predicted_gas_after'],
-            'actual_gas_after': actual_gas_after_action,
-            'prediction_error_ppm': abs(actual_gas_after_action - best_candidate['predicted_gas_after']),
+            'selection_correct': selection_correct,
+            'predicted_risk_after': predicted_risk_after,
+            'actual_risk_after': measured_risk_after,
+            'prediction_error': risk_error,
+            # Backward-compatible dashboard fields
+            'predicted_gas_after': 60.0 + (predicted_risk_after * 260.0),
+            'actual_gas_after': measured_context['safety_signal'],
+            'prediction_error_ppm': risk_error * 260.0,
             'execution_time_seconds': execution_time,
             'command_executed': command_executed,
             'command_id': command_id,
             'esp_command': esp_command,
-            'gas_sensor_mode': self.gas_sensor_mode,
-            'proxy_mode_used': self.gas_sensor_mode != 'direct',
+            'sampling_interval_seconds': applied_sampling_interval,
+            'fan_speed': best_candidate.get('fan_speed', 0.0),
+            'led_level': best_candidate.get('led_level', 0.0),
+            'buzzer_enabled': best_candidate.get('buzzer_enabled', False),
         }
-        
+
         adapted_state = {
-            'gas_level': actual_gas_after_action,
-            'temperature': actual_temp_after_action,
-            'humidity': adapted_reading.get('humidity', 60.0),
+            'temperature': measured_context['temperature'],
+            'lux': measured_context['lux'],
+            'pir': measured_context['pir'],
+            'risk_score': measured_context['risk_score'],
+            'gas_level': measured_context['safety_signal'],
+            'safety_signal': measured_context['safety_signal'],
+            'humidity': 60.0,
             'fan_speed': best_candidate.get('fan_speed', 0.0),
             'buzzer_enabled': best_candidate.get('buzzer_enabled', False),
-            'sampling_rate': best_candidate.get('sampling_rate', 'normal'),
+            'led_level': best_candidate.get('led_level', 0.0),
+            'sampling_rate': f"{int(applied_sampling_interval)}s",
+            'sampling_interval_seconds': applied_sampling_interval,
             'timestamp': time.time(),
             'action_applied': best_candidate['id'],
-            'actual_gas_reduction': actual_gas_reduction,
-            'gas_sensor_mode': self.gas_sensor_mode,
+            'actual_risk_reduction': risk_reduction,
+            'actual_gas_reduction': risk_reduction * 260.0,
         }
-        
+
+        self._pending_learning_sample = {
+            'fault_state': fault_state,
+            'selected_candidate': best_candidate,
+            'predicted_context': predicted_context,
+            'measured_context': measured_context,
+            'risk_error': risk_error,
+        }
+
         return decision, adapted_state
     
     def verification_phase(self, trial_number: int, adapted_state: Dict,
                           decision: Optional[Dict]) -> Tuple[Dict, bool]:
-        """PHASE 4: Verify action effectiveness - did gas level reduce to safe?"""
+        """PHASE 4: Verify adaptive stability and update learning state."""
         logger.info("  [VERIFY] Measuring effectiveness...")
-        
-        final_reading = read_sensors()
-        final_gas = self._effective_gas(final_reading, fallback_if_proxy=adapted_state['gas_level'])
-        final_temp = final_reading.get('temperature', 25.0)
-        
-        # Success = gas returned to safe level (below threshold)
-        success = final_gas < self.GAS_FAULT_THRESHOLD
-        
+
+        time.sleep(min(10.0, max(4.0, self.sample_interval_seconds * 0.8)))
+        final_context = self._build_context(read_sensors(), self._last_baseline_context)
+
+        baseline_risk = float(self._last_baseline_context.get('risk_score', 0.20))
+        final_risk = final_context['risk_score']
+        dynamic_success_threshold = min(self.risk_threshold, baseline_risk + 0.18)
+        success = final_risk <= dynamic_success_threshold
+
         if success:
-            logger.info(f"  ✓ SUCCESS: Gas reduced to {final_gas:.0f}ppm (SAFE)")
+            logger.info(f"  ✓ SUCCESS: Risk stabilized to {final_risk:.3f} (safe threshold {dynamic_success_threshold:.3f})")
         else:
-            logger.warning(f"  ✗ FAILED: Gas still {final_gas:.0f}ppm (UNSAFE)")
-        
-        send_sensor_data_to_backend(final_reading, {
+            logger.warning(f"  ✗ FAILED: Risk remains elevated at {final_risk:.3f} (threshold {dynamic_success_threshold:.3f})")
+
+        send_sensor_data_to_backend(
+            {
+                'temperature': final_context['temperature'],
+                'lux': final_context['lux'],
+                'pir': final_context['pir'],
+                'gas': None,
+            },
+            {
             'trial': trial_number,
             'phase': 'verified',
             'experiment': self.EXPERIMENT_TYPE,
             'event': 'fault_resolved' if success else 'fault_persistent',
-            'final_gas_level': final_gas,
+            'final_risk_score': final_risk,
+            'final_gas_level': final_context['safety_signal'],
             'action_effective': success,
-            'gas_sensor_mode': self.gas_sensor_mode,
-        })
-        
+            },
+        )
+
+        if self._pending_learning_sample and decision:
+            self._update_learning_from_outcome(final_context)
+
         final_state = {
-            'gas_level': final_gas,
-            'temperature': final_temp,
-            'humidity': final_reading.get('humidity', 60.0),
+            'temperature': final_context['temperature'],
+            'lux': final_context['lux'],
+            'pir': final_context['pir'],
+            'risk_score': final_context['risk_score'],
+            'gas_level': final_context['safety_signal'],
+            'safety_signal': final_context['safety_signal'],
+            'humidity': 60.0,
             'fan_speed': adapted_state.get('fan_speed', 0.0),
-            'gas_sensor_mode': self.gas_sensor_mode,
+            'sampling_interval_seconds': adapted_state.get('sampling_interval_seconds', self.sample_interval_seconds),
             'timestamp': time.time()
         }
-        
+
         return final_state, success
     
+    def _update_learning_from_outcome(self, final_context: Dict[str, Any]) -> None:
+        sample = self._pending_learning_sample or {}
+        fault_state = sample.get('fault_state', {})
+        selected = sample.get('selected_candidate', {})
+        predicted_context = sample.get('predicted_context', {})
+
+        action_id = selected.get('id')
+        if action_id not in self.learning_state.get('action_models', {}):
+            return
+
+        action_model = self.learning_state['action_models'][action_id]
+        controls = action_model.get('controls', {})
+        effect = action_model.get('effect', {})
+
+        learning_rate = self._clamp(float(self.learning_state.get('learning_rate', 0.18)), 0.05, 0.35)
+
+        fault_temp = float(fault_state.get('temperature', self._last_baseline_context.get('temperature', 25.0)))
+        fault_lux = float(fault_state.get('lux', self._last_baseline_context.get('lux', 260.0)))
+        fault_pir = float(fault_state.get('pir', self._last_baseline_context.get('pir', 0.0)))
+
+        actual_temp = float(final_context.get('temperature', fault_temp))
+        actual_lux = float(final_context.get('lux', fault_lux))
+        actual_pir = float(final_context.get('pir', fault_pir))
+
+        pred_temp = float(predicted_context.get('temperature', fault_temp))
+        pred_lux = float(predicted_context.get('lux', fault_lux))
+        pred_pir = float(predicted_context.get('pir', fault_pir))
+
+        temp_span = max(1.0, abs(fault_temp - float(self._last_baseline_context.get('temperature', fault_temp))) + 1.0)
+        lux_span = max(20.0, abs(float(self._last_baseline_context.get('lux', fault_lux)) - fault_lux) + 20.0)
+        pir_span = 1.0
+
+        observed_temp_improvement = self._clamp((fault_temp - actual_temp) / temp_span, 0.0, 1.5)
+        predicted_temp_improvement = self._clamp((fault_temp - pred_temp) / temp_span, 0.0, 1.5)
+        observed_lux_improvement = self._clamp((actual_lux - fault_lux) / lux_span, 0.0, 1.5)
+        predicted_lux_improvement = self._clamp((pred_lux - fault_lux) / lux_span, 0.0, 1.5)
+        observed_pir_improvement = self._clamp((fault_pir - actual_pir) / pir_span, 0.0, 1.0)
+        predicted_pir_improvement = self._clamp((fault_pir - pred_pir) / pir_span, 0.0, 1.0)
+
+        fan_speed = max(0.05, float(selected.get('fan_speed', controls.get('fan_speed', 0.0))))
+        led_level = max(0.05, float(selected.get('led_level', controls.get('led_level', 0.0))))
+        buzzer_factor = 1.0 if bool(selected.get('buzzer_enabled', controls.get('buzzer_enabled', False))) else 0.35
+
+        temp_error = observed_temp_improvement - predicted_temp_improvement
+        lux_error = observed_lux_improvement - predicted_lux_improvement
+        pir_error = observed_pir_improvement - predicted_pir_improvement
+
+        effect['temperature'] = self._clamp(
+            float(effect.get('temperature', 0.4)) + (learning_rate * temp_error / fan_speed),
+            0.05,
+            1.80,
+        )
+        effect['lux'] = self._clamp(
+            float(effect.get('lux', 0.2)) + (learning_rate * lux_error / led_level),
+            0.05,
+            2.20,
+        )
+        effect['pir'] = self._clamp(
+            float(effect.get('pir', 0.2)) + (learning_rate * pir_error / buzzer_factor),
+            0.02,
+            1.20,
+        )
+
+        fault_risk = float(fault_state.get('risk_score', 0.6))
+        final_risk = float(final_context.get('risk_score', 0.6))
+        improvement = self._clamp(fault_risk - final_risk, 0.0, 1.0)
+
+        blend = learning_rate * (0.40 + improvement)
+        controls['fan_speed'] = self._clamp(
+            ((1.0 - blend) * float(controls.get('fan_speed', 0.5))) + (blend * float(selected.get('fan_speed', 0.5))),
+            0.0,
+            1.0,
+        )
+        controls['led_level'] = self._clamp(
+            ((1.0 - blend) * float(controls.get('led_level', 0.4))) + (blend * float(selected.get('led_level', 0.4))),
+            0.0,
+            1.0,
+        )
+        chosen_sampling = float(selected.get('sampling_interval_seconds', controls.get('sampling_interval_seconds', 10.0)))
+        controls['sampling_interval_seconds'] = self._clamp(
+            ((1.0 - blend) * float(controls.get('sampling_interval_seconds', 10.0))) + (blend * chosen_sampling),
+            6.0,
+            14.0,
+        )
+        controls['buzzer_enabled'] = bool(selected.get('buzzer_enabled', controls.get('buzzer_enabled', False)))
+
+        action_model['count'] = int(action_model.get('count', 0)) + 1
+
+        # Re-weight risk features toward dominant observed stress features.
+        contributions = {
+            'temperature': max(0.0, float(fault_state.get('temp_stress', 0.0))),
+            'lux': max(0.0, float(fault_state.get('lux_stress', 0.0))),
+            'pir': max(0.0, float(fault_state.get('pir_stress', 0.0))),
+        }
+        total_contrib = sum(contributions.values())
+        if total_contrib > 0:
+            target = {k: v / total_contrib for k, v in contributions.items()}
+            weights = self.learning_state.get('risk_weights', {})
+            for sensor in ['temperature', 'lux', 'pir']:
+                prev = float(weights.get(sensor, 1.0 / 3.0))
+                weights[sensor] = self._clamp(((1.0 - learning_rate) * prev) + (learning_rate * target[sensor]), 0.05, 0.90)
+
+            norm = sum(weights.values())
+            if norm > 0:
+                for sensor in ['temperature', 'lux', 'pir']:
+                    weights[sensor] = weights[sensor] / norm
+
+        self._update_sensor_stats(final_context)
+
+        exploration_rate = float(self.learning_state.get('exploration_rate', 0.22))
+        self.learning_state['exploration_rate'] = self._clamp(exploration_rate * 0.985, 0.06, 0.30)
+        self._persist_learning_state()
+        self._pending_learning_sample = None
+
     def compute_experiment_metrics(self, trial_num: int, baseline: Dict, fault: Dict,
                                     adapted: Dict, final: Dict, decision: Optional[Dict]) -> Dict:
-        """
-        Compute E1-specific metrics based on ACTUAL MEASURED DATA, not simulations.
-        
-        Key: Compare DT predictions vs actual hardware outcomes.
-        """
+        """Compute E1 metrics using learned risk signal and compatibility aliases."""
         if not decision:
             return {
                 'selection_correct': 0.0,
@@ -776,175 +1125,257 @@ class E1CandidateSelectionRunner(BaseExperimentRunner):
                 'best_impact_score': 0.0,
                 'execution_time_seconds': 0.0,
                 'predicted_vs_actual_error_ppm': 0.0,
-                'gas_reduction_actual': 0.0
+                'predicted_vs_actual_error': 0.0,
+                'gas_reduction_actual': 0.0,
+                'risk_reduction_actual': 0.0,
             }
-        
-        # Actual measurements from hardware
-        gas_reduction_actual = fault['gas_level'] - final['gas_level']
-        prediction_error = decision.get('prediction_error_ppm', 0.0)
-        
+
+        risk_reduction_actual = max(0.0, float(fault['risk_score']) - float(final['risk_score']))
+        gas_reduction_actual = max(0.0, float(fault['gas_level']) - float(final['gas_level']))
+        prediction_error = float(decision.get('prediction_error', 0.0))
+
         return {
             'selection_correct': 1.0 if decision.get('selection_correct') else 0.0,
             'candidates_evaluated': decision.get('candidates_evaluated', 0),
             'best_impact_score': decision.get('best_score', 0.0),
             'selected_action': decision.get('action_name', ''),
             'candidates_ranked': decision.get('candidates_scores', []),
+            'predicted_risk_after': decision.get('predicted_risk_after', 0.0),
+            'actual_risk_after': decision.get('actual_risk_after', 0.0),
             'predicted_gas_after': decision.get('predicted_gas_after', 0.0),
             'actual_gas_after': decision.get('actual_gas_after', 0.0),
-            'dt_prediction_error_ppm': prediction_error,
+            'dt_prediction_error_ppm': prediction_error * 260.0,
+            'predicted_vs_actual_error': prediction_error,
             'execution_time_seconds': decision.get('execution_time_seconds', 0.0),
-            'gas_baseline_to_fault': fault['gas_level'] - baseline['gas_level'],
-            'gas_reduction_actual': max(0.0, gas_reduction_actual),
-            'fault_resolved': final['gas_level'] < self.GAS_FAULT_THRESHOLD,
-            'dt_model_accuracy': 1.0 - min(1.0, prediction_error / max(1.0, fault['gas_level']))  # Error as % of baseline
+            'risk_baseline_to_fault': max(0.0, float(fault['risk_score']) - float(baseline['risk_score'])),
+            'gas_baseline_to_fault': max(0.0, float(fault['gas_level']) - float(baseline['gas_level'])),
+            'risk_reduction_actual': risk_reduction_actual,
+            'gas_reduction_actual': gas_reduction_actual,
+            'fault_resolved': bool(final['risk_score'] <= self.risk_threshold),
+            'dt_model_accuracy': 1.0 - min(1.0, prediction_error),
+            'sampling_interval_seconds': decision.get('sampling_interval_seconds', self.sample_interval_seconds),
+            'initial_temperature': baseline.get('temperature'),
+            'final_temperature': final.get('temperature'),
+            'fan_speed': decision.get('fan_speed', adapted.get('fan_speed', 0.0)),
         }
     
     def compute_experiment_summary(self) -> Dict:
-        """E1 summary: Selection accuracy, DT prediction accuracy, execution speed."""
+        """E1 summary: adaptive learning quality, risk reduction, and response time."""
         if not self.selection_accuracy_scores:
             return {}
-        
-        # Prediction errors across all trials
+
+        prediction_errors = []
         all_prediction_errors = []
         for trial_scores in self.candidate_scores_per_trial:
             for cand in trial_scores:
-                if 'predicted_gas_after' in cand:
-                    all_prediction_errors.append(cand.get('prediction_error_ppm', 0.0))
-        
+                if 'predicted_risk_after' in cand:
+                    all_prediction_errors.append(cand.get('predicted_risk_after', 0.0))
+
+        for trial in self.results.get('trials', []):
+            metrics = trial.get('experiment_metrics', {})
+            if metrics:
+                prediction_errors.append(float(metrics.get('predicted_vs_actual_error', 0.0)))
+
+        weights = self.learning_state.get('risk_weights', {})
+
         return {
             'selection_accuracy': safe_mean(self.selection_accuracy_scores),
             'total_trials': len(self.selection_accuracy_scores),
             'correct_selections': sum(self.selection_accuracy_scores),
             'avg_execution_time_seconds': safe_mean(self.execution_times),
-            'dt_prediction_mae': safe_mean(all_prediction_errors),
+            'avg_risk_reduction': safe_mean(self.risk_reduction_scores),
+            'dt_prediction_mae': safe_mean(prediction_errors),
             'candidate_scores_analysis': self._analyze_candidate_scores(),
-            'key_findings': self._derive_key_findings()
+            'learned_risk_weights': {
+                'temperature': float(weights.get('temperature', 0.0)),
+                'lux': float(weights.get('lux', 0.0)),
+                'pir': float(weights.get('pir', 0.0)),
+            },
+            'sampling_interval_seconds': self.sample_interval_seconds,
+            'key_findings': self._derive_key_findings(),
         }
     
     def _derive_key_findings(self) -> List[str]:
-        """Extract key research findings from E1 results."""
+        """Extract key findings for adaptive E1 behavior."""
         findings = []
-        
+
         if len(self.selection_accuracy_scores) > 0:
             accuracy = safe_mean(self.selection_accuracy_scores)
             if accuracy >= 0.9:
-                findings.append("✓ E1 shows HIGH selection accuracy - DT correctly identifies effective actions without hardcoding")
+                findings.append("✓ E1 shows high adaptive success across mixed lux/PIR/temperature disturbances")
             elif accuracy >= 0.5:
-                findings.append("△ E1 shows MODERATE accuracy - DT selection sometimes misses best candidate")
+                findings.append("△ E1 shows moderate adaptive success; more online learning cycles should improve policy fit")
             else:
-                findings.append("✗ E1 shows LOW accuracy - DT selection often chooses ineffective actions")
-        
+                findings.append("✗ E1 still underperforming; policy requires additional exploration and learning")
+
         if len(self.execution_times) > 0:
             avg_time = safe_mean(self.execution_times)
             if avg_time < 5.0:
-                findings.append("✓ Execution fast - MAPE cycle completes in <5s, enabling reactive adaptation")
+                findings.append("✓ MAPE decision latency is fast (<5s)")
             elif avg_time < 10.0:
-                findings.append("△ Execution moderate - MAPE cycle takes ~5-10s")
+                findings.append("△ MAPE latency is moderate (~5-10s)")
             else:
-                findings.append("✗ Execution slow - MAPE cycle >10s may miss critical windows")
-        
+                findings.append("✗ MAPE latency is high (>10s), investigate backend/dispatch bottlenecks")
+
+        avg_reduction = safe_mean(self.risk_reduction_scores)
+        if avg_reduction >= 0.18:
+            findings.append("✓ Learned policy achieves strong average risk reduction per trial")
+        elif avg_reduction > 0.05:
+            findings.append("△ Learned policy reduces risk but with limited margin; continue training")
+        else:
+            findings.append("✗ Risk reduction is weak; increase trials to let model converge")
+
         return findings
-    
+
     # ==================== E1-SPECIFIC HELPERS ====================
-    
-    def _generate_candidates(self) -> List[Dict]:
-        """
-        Generate 4 candidate actions (static definitions, not scored yet).
-        Scoring happens via actual DT simulation in backend.
-        """
-        return [
-            {
-                'id': 'C1',
-                'name': 'Fan Only',
-                'description': 'Increase ventilation fan to maximum to disperse gas',
-                'fan_speed': 1.0,
-                'buzzer_enabled': False,
-                'sampling_rate': 'normal',
-                'esp_command': self._build_esp_command_for_candidate('C1')
-            },
-            {
-                'id': 'C2',
-                'name': 'Buzzer Only',
-                'description': 'Sound alarm to alert occupants (safety measure)',
-                'fan_speed': 0.0,
-                'buzzer_enabled': True,
-                'sampling_rate': 'normal',
-                'esp_command': self._build_esp_command_for_candidate('C2')
-            },
-            {
-                'id': 'C3',
-                'name': 'Fan + Buzzer',
-                'description': 'Combine ventilation with safety alert',
-                'fan_speed': 0.8,
-                'buzzer_enabled': True,
-                'sampling_rate': 'normal',
-                'esp_command': self._build_esp_command_for_candidate('C3')
-            },
-            {
-                'id': 'C4',
-                'name': 'Reduced Sampling',
-                'description': 'Lower polling frequency to save energy',
-                'fan_speed': 0.0,
-                'buzzer_enabled': False,
-                'sampling_rate': 'slow',
-                'esp_command': self._build_esp_command_for_candidate('C4')
-            },
-        ]
-    
-    def _call_backend_dt_simulate(self, candidate: Dict, current_gas: float, 
-                                  current_temp: float, trial_number: int) -> Optional[Dict]:
-        """
-        Call REAL backend Digital Twin model to SIMULATE the outcome of this candidate.
-        
-        Backend runs DT simulation and returns:
-        - predicted_gas_after: DT-predicted gas level if action taken
-        - predicted_temp_after: DT-predicted temperature
-        - reasoning: Why this prediction
-        - impact_score: Effectiveness score based on predicted outcome
-        """
-        try:
-            payload = {
-                'node_id': NODE_ID,
-                'trial_number': trial_number,
-                'candidate_action': {
-                    'action_id': candidate['id'],
-                    'fan_speed': candidate['fan_speed'],
-                    'buzzer_enabled': candidate['buzzer_enabled'],
-                    'sampling_rate': candidate['sampling_rate']
-                },
-                'current_state': {
-                    'gas_level': current_gas,
-                    'temperature': current_temp,
-                    'timestamp': time.time()
-                }
+
+    def _generate_candidates(self, fault_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        models = self.learning_state.get('action_models', {})
+        exploration = self._clamp(float(self.learning_state.get('exploration_rate', 0.22)), 0.05, 0.35)
+        candidates: List[Dict[str, Any]] = []
+
+        for action_id, model in models.items():
+            controls = model.get('controls', {})
+
+            fan_speed = self._clamp(
+                float(controls.get('fan_speed', 0.5))
+                + random.uniform(-0.18, 0.18) * (0.8 + exploration),
+                0.0,
+                1.0,
+            )
+            led_level = self._clamp(
+                float(controls.get('led_level', 0.4))
+                + random.uniform(-0.20, 0.20) * (0.8 + exploration),
+                0.0,
+                1.0,
+            )
+
+            default_buzzer = bool(controls.get('buzzer_enabled', False))
+            should_alert = fault_state.get('pir', 0.0) >= 0.5 and fault_state.get('risk_score', 0.0) >= (self.risk_threshold * 0.9)
+            buzzer_enabled = default_buzzer or (should_alert and random.random() < (0.35 + exploration))
+
+            sampling_interval = self._clamp(
+                float(controls.get('sampling_interval_seconds', self.sample_interval_seconds))
+                + random.uniform(-2.0, 2.0) * exploration,
+                6.0,
+                14.0,
+            )
+
+            candidate = {
+                'id': action_id,
+                'name': model.get('name', action_id),
+                'description': (
+                    f"fan={fan_speed:.2f}, led={led_level:.2f}, "
+                    f"buzzer={int(buzzer_enabled)}, sample={sampling_interval:.1f}s"
+                ),
+                'fan_speed': fan_speed,
+                'led_level': led_level,
+                'buzzer_enabled': buzzer_enabled,
+                'sampling_rate': f"{int(sampling_interval)}s",
+                'sampling_interval_seconds': sampling_interval,
+                'esp_command': self._build_esp_command_from_candidate(
+                    fan_speed=fan_speed,
+                    led_level=led_level,
+                    buzzer_enabled=buzzer_enabled,
+                ),
+                'history_count': int(model.get('count', 0)),
             }
-            
-            url = f"{BACKEND_URL}/demo-board/simulate-candidate-effect"
-            response = requests.post(url, json=payload, timeout=10)
-            
-            if response.status_code == 200:
-                result = response.json()
-                logger.info(f"      DT Simulation returned: {result}")
-                return result
-            else:
-                logger.warning(f"      Backend returned {response.status_code}: {response.text}")
-                return None
-        except Exception as e:
-            logger.error(f"      Failed to call backend DT simulator: {e}")
+            candidates.append(candidate)
+
+        return candidates
+
+    def _simulate_candidate_effect(self, candidate: Dict[str, Any], fault_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        try:
+            action_id = candidate['id']
+            action_model = self.learning_state.get('action_models', {}).get(action_id, {})
+            effect = action_model.get('effect', {})
+
+            baseline_temp = float(self._last_baseline_context.get('temperature', fault_state.get('temperature', 25.0)))
+            baseline_lux = float(self._last_baseline_context.get('lux', fault_state.get('lux', 260.0)))
+
+            current_temp = float(fault_state.get('temperature', baseline_temp))
+            current_lux = float(fault_state.get('lux', baseline_lux))
+            current_pir = float(fault_state.get('pir', 0.0))
+            current_risk = float(fault_state.get('risk_score', 0.5))
+            current_temp_stress = max(0.0, float(fault_state.get('temp_stress', 0.0)))
+            current_lux_stress = max(0.0, float(fault_state.get('lux_stress', 0.0)))
+            current_pir_stress = max(0.0, float(fault_state.get('pir_stress', 0.0)))
+
+            fan_speed = float(candidate.get('fan_speed', 0.0))
+            led_level = float(candidate.get('led_level', 0.0))
+            buzzer_enabled = bool(candidate.get('buzzer_enabled', False))
+            sampling_interval_seconds = float(candidate.get('sampling_interval_seconds', self.sample_interval_seconds))
+
+            temp_span = max(1.0, abs(current_temp - baseline_temp) + 1.0)
+            lux_span = max(20.0, baseline_lux * 0.5)
+
+            temp_relief = fan_speed * float(effect.get('temperature', 0.4))
+            lux_relief = led_level * float(effect.get('lux', 0.3))
+            pir_relief = (1.0 if buzzer_enabled else 0.35) * float(effect.get('pir', 0.2))
+
+            predicted_temp_stress = max(0.0, current_temp_stress - temp_relief)
+            predicted_lux_stress = max(0.0, current_lux_stress - lux_relief)
+            predicted_pir_stress = max(0.0, current_pir_stress - pir_relief)
+
+            predicted_temp = max(baseline_temp, current_temp - (temp_relief * temp_span))
+            predicted_lux = max(1.0, current_lux + (lux_relief * lux_span))
+            predicted_pir = self._clamp(current_pir * (1.0 - min(0.9, pir_relief)), 0.0, 1.0)
+
+            weights = self.learning_state.get('risk_weights', {})
+            predicted_raw_risk = (
+                float(weights.get('temperature', 0.38)) * predicted_temp_stress
+                + float(weights.get('lux', 0.34)) * predicted_lux_stress
+                + float(weights.get('pir', 0.28)) * predicted_pir_stress
+            )
+            predicted_risk = self._clamp(1.0 - math.exp(-predicted_raw_risk), 0.0, 1.0)
+            risk_reduction = max(0.0, current_risk - predicted_risk)
+
+            energy_cost = (0.58 * fan_speed) + (0.22 * led_level) + (0.20 * (1.0 if buzzer_enabled else 0.0))
+            sampling_penalty = abs(sampling_interval_seconds - 10.0) / 10.0
+
+            history_count = int(candidate.get('history_count', 0))
+            uncertainty_bonus = 1.0 / math.sqrt(max(1, history_count + 1))
+
+            # Risk reduction must dominate utility: low-cost actions should not win when
+            # they fail to lower predicted risk.
+            weighted_reduction = risk_reduction * (1.0 + min(0.4, current_risk))
+
+            impact_score = self._clamp(
+                weighted_reduction
+                - (0.12 * energy_cost)
+                - (0.03 * sampling_penalty)
+                + (0.06 * uncertainty_bonus),
+                0.0,
+                1.0,
+            )
+
+            reasoning = (
+                f"pred_risk={predicted_risk:.3f}, Δrisk={risk_reduction:.3f}, "
+                f"fan={fan_speed:.2f}, led={led_level:.2f}, buzzer={int(buzzer_enabled)}, "
+                f"sample={sampling_interval_seconds:.1f}s"
+            )
+
+            return {
+                'predicted_risk_after': predicted_risk,
+                'predicted_temp_after': predicted_temp,
+                'predicted_lux_after': predicted_lux,
+                'predicted_pir_after': predicted_pir,
+                'impact_score': impact_score,
+                'reasoning': reasoning,
+            }
+        except Exception as exc:
+            logger.warning(f"[E1] Candidate simulation failed for {candidate.get('id')}: {exc}")
             return None
-    
-    def _build_esp_command_for_candidate(self, candidate_id: str) -> List:
-        """
-        Build ESP32 command array from candidate ID.
-        Format: [strip0, strip1, strip2, strip3, buzzer, tube, tube_rgb[], fan_speed]
-        """
-        candidate_commands = {
-            'C1': [0, 0, 0, 0, 0, 0, [0, 0, 0], 255],      # Fan full (PWM 255)
-            'C2': [0, 0, 0, 0, 2, 0, [0, 0, 0], 0],        # Buzzer mode 2
-            'C3': [0, 0, 0, 0, 2, 0, [0, 0, 0], 204],      # Buzzer + fan 80% (204/255)
-            'C4': [0, 0, 0, 0, 0, 0, [0, 0, 0], 0],        # No action (reduced sampling is backend config)
-        }
-        return candidate_commands.get(candidate_id, [0, 0, 0, 0, 0, 0, [0, 0, 0], 0])
+
+    def _build_esp_command_from_candidate(self, fan_speed: float, led_level: float, buzzer_enabled: bool) -> List[Any]:
+        strip_state = 1 if led_level >= 0.40 else 0
+        buzzer_mode = 2 if buzzer_enabled else 0
+        fan_pwm = int(self._clamp(fan_speed, 0.0, 1.0) * 255)
+
+        rgb_base = int(40 + (180 * self._clamp(led_level, 0.0, 1.0)))
+        tube_rgb = [rgb_base, rgb_base, min(255, rgb_base + 20)]
+
+        return [strip_state, strip_state, strip_state, strip_state, buzzer_mode, 1 if strip_state else 0, tube_rgb, fan_pwm]
     
     def _send_esp_command(self, esp_command: List, trial_number: int, candidate: Dict) -> Tuple[bool, Optional[str]]:
         """
@@ -983,8 +1414,7 @@ class E1CandidateSelectionRunner(BaseExperimentRunner):
         """Analyze candidate scores across all trials for reporting."""
         if not self.candidate_scores_per_trial:
             return {}
-        
-        # Aggregate score statistics per candidate ID
+
         candidate_stats = {}
         for trial_scores in self.candidate_scores_per_trial:
             for cand in trial_scores:
@@ -993,25 +1423,24 @@ class E1CandidateSelectionRunner(BaseExperimentRunner):
                     candidate_stats[cid] = {
                         'name': cand['name'],
                         'scores': [],
-                        'predicted_gases': [],
+                        'predicted_risks': [],
                         'reasoning': cand['reasoning']
                     }
                 candidate_stats[cid]['scores'].append(cand['impact_score'])
-                candidate_stats[cid]['predicted_gases'].append(cand['predicted_gas_after'])
-        
-        # Compute per-candidate statistics
+                candidate_stats[cid]['predicted_risks'].append(cand['predicted_risk_after'])
+
         analysis = {}
         for cid, stats in candidate_stats.items():
             analysis[cid] = {
                 'name': stats['name'],
                 'avg_score': safe_mean(stats['scores']),
-                'avg_predicted_gas': safe_mean(stats['predicted_gases']),
+                'avg_predicted_risk': safe_mean(stats['predicted_risks']),
                 'max_score': max(stats['scores']) if stats['scores'] else 0.0,
                 'min_score': min(stats['scores']) if stats['scores'] else 0.0,
                 'times_ranked_best': len([s for s in stats['scores'] if s == max(stats['scores'])]) if stats['scores'] else 0,
                 'reasoning': stats['reasoning']
             }
-        
+
         return analysis
 
 
