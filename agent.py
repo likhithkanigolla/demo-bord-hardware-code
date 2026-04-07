@@ -189,8 +189,8 @@ def send_esp_command(cmd, target_url=None):
         if isinstance(cmd, list) and len(cmd) >= 8:
             logger.info(f"  - Random prefix: {cmd[0:4]}")
             logger.info(f"  - Buzzer mode: {cmd[4]}")
-            logger.info(f"  - LED state: {cmd[5]} (0=OFF, 1=ON)")
-            logger.info(f"  - RGB color: {cmd[6]} [R, G, B]")
+            logger.info(f"  - Tube state: {cmd[5]} (0=OFF, 1=ON)")
+            logger.info(f"  - Tube RGB color: {cmd[6]} [R, G, B]")
             logger.info(f"  - Fan speed: {cmd[7]} (0-255)")
         else:
             logger.info(f"  - Command format unexpected: {cmd}")

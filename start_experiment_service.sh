@@ -96,12 +96,43 @@ fi
 
 source "$VENV_PATH/bin/activate"
 
+PY_CMD="$VENV_PATH/bin/python"
+PIP_CMD="$VENV_PATH/bin/pip"
+
+if [ ! -x "$PY_CMD" ]; then
+    echo "ERROR: Python executable not found in virtual environment: $PY_CMD"
+    exit 1
+fi
+
 # Install dependencies if requirements exist
 if [ -f "requirements.txt" ]; then
     echo "Installing/updating dependencies..."
-    pip install -U pip setuptools wheel
-    pip install -r requirements.txt
+    "$PIP_CMD" install -U pip setuptools wheel
+    "$PIP_CMD" install -r requirements.txt
 fi
+
+# Validate runtime before starting long-running services.
+preflight_checks() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Running preflight checks..."
+
+    if [ ! -f "pi_experiment_service.py" ]; then
+        echo "ERROR: Missing pi_experiment_service.py"
+        return 1
+    fi
+    if [ ! -f "experiment_runner_refactored.py" ]; then
+        echo "ERROR: Missing experiment_runner_refactored.py"
+        return 1
+    fi
+
+    "$PY_CMD" - <<'PY'
+from experiment_runner_refactored import create_experiment_runner
+
+for exp in ("E1", "E2", "E3", "E4", "E5"):
+    create_experiment_runner(exp, trials=1)
+
+print("Preflight OK: experiment runners E1-E5 can be constructed")
+PY
+}
 
 # ============ START SERVICE ==========
 
@@ -114,10 +145,15 @@ start_services() {
     export PI_SERVICE_HOST=$PI_SERVICE_HOST
     export PYTHONUNBUFFERED=1
     export LOG_LEVEL=${LOG_LEVEL:-INFO}
+    export DT_ALLOW_BOOTSTRAP_PARAMS=${DT_ALLOW_BOOTSTRAP_PARAMS:-0}
+    export E2_FAULT_SETTLE_SECONDS=${E2_FAULT_SETTLE_SECONDS:-5}
+    export E2_VERIFY_WINDOW_SECONDS=${E2_VERIFY_WINDOW_SECONDS:-8}
+
+    preflight_checks
 
     # Start agent in background (continuous sensor collection)
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Pi Agent in background (LOG_LEVEL=$LOG_LEVEL)..."
-    nohup python3 agent.py > "${SCRIPT_DIR}/logs/pi_agent.log" 2>&1 &
+    nohup "$PY_CMD" agent.py > "${SCRIPT_DIR}/logs/pi_agent.log" 2>&1 &
     AGENT_PID=$!
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Agent PID: $AGENT_PID (logs: ${SCRIPT_DIR}/logs/pi_agent.log)"
 
@@ -135,7 +171,7 @@ start_services() {
 
     # Run service with logging
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Experiment Service..."
-    python3 pi_experiment_service.py 2>&1 | tee -a "$LOG_FILE"
+    "$PY_CMD" pi_experiment_service.py 2>&1 | tee -a "$LOG_FILE"
 }
 
 stop_services() {

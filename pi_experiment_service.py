@@ -56,15 +56,15 @@ class WebSocketLogHandler(logging.Handler):
                 potential_id = msg[start+1:end]
                 if '_' in potential_id or potential_id.startswith('E'):
                     execution_id = potential_id
-            except:
+            except Exception:
                 pass
         
         # Broadcast if we found an execution_id
         if execution_id:
             level_name = record.levelname
             try:
-                asyncio.create_task(broadcast_log(execution_id, level_name, msg))
-            except:
+                _task = asyncio.create_task(broadcast_log(execution_id, level_name, msg))
+            except Exception:
                 pass
 
 # Add the WebSocket handler to the logger
@@ -100,7 +100,7 @@ async def broadcast_log(execution_id: str, level: str, message: str):
         for websocket in active_connections[execution_id]:
             try:
                 await websocket.send_json(log_entry)
-            except:
+            except Exception:
                 disconnected.add(websocket)
         
         # Remove disconnected clients
@@ -287,7 +287,18 @@ def _run_e2_experiment(execution_id: str, state: ExperimentState, req: Experimen
         logger.info(f"[{execution_id}] Starting E2 with {req.trials} trials")
         
         # Use refactored hybrid architecture
-        runner = create_experiment_runner('E2', trials=req.trials)
+        delayed_sync_trials = min(5, max(0, req.trials))
+        runner = create_experiment_runner(
+            'E2',
+            trials=req.trials,
+            ambient_min=22.0,
+            ambient_max=35.0,
+            delayed_sync_trials=delayed_sync_trials,
+            delayed_sync_seconds=45,
+            default_fan_speed=0.8,
+            action_duration_seconds=20,
+            acceptable_error_c=2.5,
+        )
         results = runner.run()
         
         state.results = {
