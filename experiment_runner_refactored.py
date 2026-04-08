@@ -420,17 +420,28 @@ class E1CandidateSelectionRunner(BaseExperimentRunner):
     RISK_THRESHOLD_DEFAULT = 0.62
     SAMPLING_INTERVAL_DEFAULT_SECONDS = 10.0
     
-    def __init__(self, trials: int = 3):
+    def __init__(
+        self,
+        trials: int = 3,
+        sample_interval_seconds: Optional[float] = None,
+        risk_threshold: Optional[float] = None,
+    ):
         super().__init__(trials)
         self.selection_accuracy_scores: List[float] = []
         self.candidate_scores_per_trial: List[List[Dict[str, Any]]] = []
         self.execution_times: List[float] = []
         self.risk_reduction_scores: List[float] = []
 
-        sample_interval = float(os.getenv("E1_SAMPLING_INTERVAL_SECONDS", str(self.SAMPLING_INTERVAL_DEFAULT_SECONDS)))
+        if sample_interval_seconds is None:
+            sample_interval = float(os.getenv("E1_SAMPLING_INTERVAL_SECONDS", str(self.SAMPLING_INTERVAL_DEFAULT_SECONDS)))
+        else:
+            sample_interval = float(sample_interval_seconds)
         self.sample_interval_seconds = max(6.0, min(14.0, sample_interval))
 
-        risk_threshold = float(os.getenv("E1_RISK_THRESHOLD", str(self.RISK_THRESHOLD_DEFAULT)))
+        if risk_threshold is None:
+            risk_threshold = float(os.getenv("E1_RISK_THRESHOLD", str(self.RISK_THRESHOLD_DEFAULT)))
+        else:
+            risk_threshold = float(risk_threshold)
         self.risk_threshold = max(0.35, min(0.90, risk_threshold))
 
         self.learning_state_path = Path(__file__).parent / "results" / "e1_adaptive_learning_state.json"
@@ -2684,10 +2695,17 @@ class E4ProactivePrevention(BaseExperimentRunner):
     EXPERIMENT_TYPE = "E4"
     DESCRIPTION = "Proactive Prevention - Predict faults BEFORE?"
     
-    def __init__(self, trials: int = 11):
+    def __init__(
+        self,
+        trials: int = 11,
+        proactive_start_trial: int = 11,
+        reactive_fault_delta_c: float = 6.0,
+    ):
         super().__init__(trials)
         self.fault_history = []
         self.proactive_actions = 0
+        self.proactive_start_trial = max(2, min(int(proactive_start_trial), max(2, trials)))
+        self.reactive_fault_delta_c = max(1.0, float(reactive_fault_delta_c))
     
     def baseline_phase(self, trial_number: int) -> Dict:
         baseline = read_sensors()
@@ -2699,11 +2717,11 @@ class E4ProactivePrevention(BaseExperimentRunner):
     
     def fault_injection_phase(self, trial_number: int, baseline: Dict) -> Dict:
         """On trial 11, simulate PREDICTED fault (no actual injection)."""
-        if trial_number < 11:
+        if trial_number < self.proactive_start_trial:
             logger.info("  Fault injection (recurring pattern)")
             time.sleep(1)
             return {
-                'temperature': baseline['temperature'] + 6.0,
+                'temperature': baseline['temperature'] + self.reactive_fault_delta_c,
                 'fault_injected': True,
                 'trial_num': trial_number,
                 'timestamp': time.time()
@@ -2722,7 +2740,7 @@ class E4ProactivePrevention(BaseExperimentRunner):
     
     def adaptation_phase(self, trial_number: int, fault_state: Dict) -> Tuple[Optional[Dict], Dict]:
         """On trial 11, issue PROACTIVE action."""
-        if trial_number < 11:
+        if trial_number < self.proactive_start_trial:
             logger.info("  Reactive adaptation")
             self._execute_fan(0.7)
             time.sleep(3)
@@ -2735,7 +2753,7 @@ class E4ProactivePrevention(BaseExperimentRunner):
         adapted = read_sensors()
         
         return {
-            'proactive': trial_number >= 11,
+            'proactive': trial_number >= self.proactive_start_trial,
             'action_time': time.time()
         }, {
             'temperature': adapted.get('temperature', fault_state['temperature'] - 1.5),
@@ -2750,7 +2768,7 @@ class E4ProactivePrevention(BaseExperimentRunner):
         actual_temp = final.get('temperature', 25.0)
         
         # On trial 11, success = proactive action prevented the fault
-        if trial_number >= 11:
+        if trial_number >= self.proactive_start_trial:
             success = actual_temp < TEMPERATURE_THRESHOLD  # No threshold violation
             logger.info(f"  Proactive result: T={actual_temp:.1f}°C - {'✓ Prevented' if success else '✗ Failed'}")
         else:
@@ -2796,10 +2814,17 @@ class E5CostOptimization(BaseExperimentRunner):
     EXPERIMENT_TYPE = "E5"
     DESCRIPTION = "Cost Optimization - Choose cheapest solution?"
     
-    def __init__(self, trials: int = 15):
+    def __init__(
+        self,
+        trials: int = 15,
+        effectiveness_threshold: float = 0.8,
+        cost_scale: float = 1.0,
+    ):
         super().__init__(trials)
         self.dt_energy = []
         self.fixed_energy = []
+        self.effectiveness_threshold = max(0.1, min(1.0, float(effectiveness_threshold)))
+        self.cost_scale = max(0.1, min(5.0, float(cost_scale)))
     
     def baseline_phase(self, trial_number: int) -> Dict:
         baseline = read_sensors()
@@ -2824,13 +2849,13 @@ class E5CostOptimization(BaseExperimentRunner):
         """Run cost-optimization: choose cheapest effective action."""
         # Three candidate actions with different costs
         candidates = [
-            {'id': 'C1-FanOnly', 'cost': 0.5, 'effectiveness': 0.8},  # Cheapest
-            {'id': 'C2-FanLED', 'cost': 1.2, 'effectiveness': 0.95},
-            {'id': 'C3-Full', 'cost': 2.0, 'effectiveness': 1.0},     # Most expensive
+            {'id': 'C1-FanOnly', 'cost': 0.5 * self.cost_scale, 'effectiveness': 0.8},  # Cheapest
+            {'id': 'C2-FanLED', 'cost': 1.2 * self.cost_scale, 'effectiveness': 0.95},
+            {'id': 'C3-Full', 'cost': 2.0 * self.cost_scale, 'effectiveness': 1.0},     # Most expensive
         ]
         
         # Select cheapest that meets effectiveness threshold (>80%)
-        viable = [c for c in candidates if c['effectiveness'] >= 0.8]
+        viable = [c for c in candidates if c['effectiveness'] >= self.effectiveness_threshold]
         best = min(viable, key=lambda x: x['cost'])
         
         logger.info(f"  Selected: {best['id']} (Cost={best['cost']}, Effectiveness={best['effectiveness']})")

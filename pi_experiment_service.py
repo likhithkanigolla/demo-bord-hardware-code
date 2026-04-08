@@ -163,6 +163,7 @@ class ExperimentRequest(BaseModel):
     experiment_type: str  # E1, E2, E3, E4, E5
     trials: int
     execution_id: str
+    experiment_config: Optional[Dict[str, Any]] = None
     fault_injection: Optional[FaultInjectionConfig] = None
 
 
@@ -191,6 +192,15 @@ class ExperimentResultData(BaseModel):
     experiment_type: str
     trials: List[TrialResultData]
     summary: Dict[str, Any]
+
+
+class IntegratedSensorFeedRequest(BaseModel):
+    execution_id: str
+    node_id: int
+    sensor_type: str = "environmental"
+    readings: Dict[str, Any]
+    timestamp: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 # ============ IN-MEMORY STATE ==========
@@ -252,9 +262,18 @@ def _run_e1_experiment(execution_id: str, state: ExperimentState, req: Experimen
     try:
         state.trials_total = req.trials
         logger.info(f"[{execution_id}] Starting E1 with {req.trials} trials")
+
+        cfg = req.experiment_config or {}
+        sample_interval_seconds = max(6.0, min(14.0, float(cfg.get("sample_interval_seconds", 10.0))))
+        risk_threshold = max(0.35, min(0.90, float(cfg.get("risk_threshold", 0.62))))
         
         # Use refactored hybrid architecture
-        runner = create_experiment_runner('E1', trials=req.trials)
+        runner = create_experiment_runner(
+            'E1',
+            trials=req.trials,
+            sample_interval_seconds=sample_interval_seconds,
+            risk_threshold=risk_threshold,
+        )
         results = runner.run()
         
         state.results = {
@@ -285,19 +304,31 @@ def _run_e2_experiment(execution_id: str, state: ExperimentState, req: Experimen
     try:
         state.trials_total = req.trials
         logger.info(f"[{execution_id}] Starting E2 with {req.trials} trials")
+
+        cfg = req.experiment_config or {}
+        ambient_min = float(cfg.get("ambient_min", 22.0))
+        ambient_max = float(cfg.get("ambient_max", 35.0))
+        if ambient_max < ambient_min:
+            ambient_min, ambient_max = ambient_max, ambient_min
+
+        delayed_sync_trials = int(cfg.get("delayed_sync_trials", min(5, max(0, req.trials))))
+        delayed_sync_trials = min(max(delayed_sync_trials, 0), req.trials)
+        delayed_sync_seconds = max(0, int(cfg.get("delayed_sync_seconds", 45)))
+        default_fan_speed = max(0.0, min(1.0, float(cfg.get("default_fan_speed", 0.8))))
+        action_duration_seconds = max(5, int(cfg.get("action_duration_seconds", 20)))
+        acceptable_error_c = max(0.1, float(cfg.get("acceptable_error_c", 2.5)))
         
         # Use refactored hybrid architecture
-        delayed_sync_trials = min(5, max(0, req.trials))
         runner = create_experiment_runner(
             'E2',
             trials=req.trials,
-            ambient_min=22.0,
-            ambient_max=35.0,
+            ambient_min=ambient_min,
+            ambient_max=ambient_max,
             delayed_sync_trials=delayed_sync_trials,
-            delayed_sync_seconds=45,
-            default_fan_speed=0.8,
-            action_duration_seconds=20,
-            acceptable_error_c=2.5,
+            delayed_sync_seconds=delayed_sync_seconds,
+            default_fan_speed=default_fan_speed,
+            action_duration_seconds=action_duration_seconds,
+            acceptable_error_c=acceptable_error_c,
         )
         results = runner.run()
         
@@ -324,11 +355,30 @@ def _run_e2_experiment(execution_id: str, state: ExperimentState, req: Experimen
 def _run_e3_experiment(execution_id: str, state: ExperimentState, req: ExperimentRequest):
     """Run E3 experiment and update state"""
     try:
-        state.trials_total = req.trials
-        logger.info(f"[{execution_id}] Starting E3 with {req.trials} trials")
+        cfg = req.experiment_config or {}
+        stable_error_threshold = max(0.1, float(cfg.get("stable_error_threshold", 1.5)))
+        sessions = int(cfg.get("sessions", 0))
+
+        if sessions > 0:
+            state.trials_total = sessions * 3
+            logger.info(f"[{execution_id}] Starting E3 with {sessions} sessions ({state.trials_total} trials)")
+        else:
+            state.trials_total = req.trials
+            logger.info(f"[{execution_id}] Starting E3 with {req.trials} trials")
         
         # Use refactored hybrid architecture
-        runner = create_experiment_runner('E3', trials=req.trials)
+        if sessions > 0:
+            runner = create_experiment_runner(
+                'E3',
+                sessions=sessions,
+                stable_error_threshold=stable_error_threshold,
+            )
+        else:
+            runner = create_experiment_runner(
+                'E3',
+                trials=req.trials,
+                stable_error_threshold=stable_error_threshold,
+            )
         results = runner.run()
         
         state.results = {
@@ -356,9 +406,18 @@ def _run_e4_experiment(execution_id: str, state: ExperimentState, req: Experimen
     try:
         state.trials_total = req.trials
         logger.info(f"[{execution_id}] Starting E4 with {req.trials} trials")
+
+        cfg = req.experiment_config or {}
+        proactive_start_trial = max(2, int(cfg.get("proactive_start_trial", 11)))
+        reactive_fault_delta_c = max(1.0, float(cfg.get("reactive_fault_delta_c", 6.0)))
         
         # Use refactored hybrid architecture
-        runner = create_experiment_runner('E4', trials=req.trials)
+        runner = create_experiment_runner(
+            'E4',
+            trials=req.trials,
+            proactive_start_trial=proactive_start_trial,
+            reactive_fault_delta_c=reactive_fault_delta_c,
+        )
         results = runner.run()
         
         state.results = {
@@ -386,9 +445,18 @@ def _run_e5_experiment(execution_id: str, state: ExperimentState, req: Experimen
     try:
         state.trials_total = req.trials
         logger.info(f"[{execution_id}] Starting E5 with {req.trials} trials")
+
+        cfg = req.experiment_config or {}
+        effectiveness_threshold = max(0.1, min(1.0, float(cfg.get("effectiveness_threshold", 0.8))))
+        cost_scale = max(0.1, min(5.0, float(cfg.get("cost_scale", 1.0))))
         
         # Use refactored hybrid architecture
-        runner = create_experiment_runner('E5', trials=req.trials)
+        runner = create_experiment_runner(
+            'E5',
+            trials=req.trials,
+            effectiveness_threshold=effectiveness_threshold,
+            cost_scale=cost_scale,
+        )
         results = runner.run()
         
         state.results = {
@@ -422,6 +490,40 @@ def health_check():
         'service': 'pi-experiment-service',
         'active_experiments': len([e for e in active_experiments.values() if e.status == 'running'])
     }
+
+
+@app.post("/integrated/sensor-feed")
+def integrated_sensor_feed(request: IntegratedSensorFeedRequest):
+    """
+    Mirror integrated simulation readings through the Pi service back to the backend
+    so the normal sensor ingestion path remains exercised during simulation mode.
+    """
+    try:
+        payload = {
+            "node_id": request.node_id,
+            "sensor_type": request.sensor_type,
+            "readings": request.readings,
+            "timestamp": request.timestamp or datetime.utcnow().isoformat() + "Z",
+            "metadata": {
+                **(request.metadata or {}),
+                "source": "pi_integrated_sensor_feed",
+                "mirrored_via_pi": True,
+            },
+        }
+        endpoint = f"{BACKEND_HOST}/demo-board/receive-sensor-data"
+        logger.info(f"[{request.execution_id}] Mirroring integrated sensor feed to backend: {endpoint}")
+        response = requests.post(endpoint, json=payload, timeout=10)
+        response.raise_for_status()
+        backend_payload = response.json() if response.content else {}
+        return {
+            "status": "mirrored",
+            "execution_id": request.execution_id,
+            "backend_status": response.status_code,
+            "backend_payload": backend_payload,
+        }
+    except Exception as exc:
+        logger.error(f"[{request.execution_id}] Integrated sensor feed failed: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Integrated sensor feed failed: {exc}")
 
 
 @app.post("/run-experiment")
