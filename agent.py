@@ -65,9 +65,31 @@ logger.info(f"CONFIG: ESP_URL = {ESP_URL}")
 SENSOR_INTERVAL_SECONDS = 10
 HEARTBEAT_INTERVAL_SECONDS = 15
 COMMAND_POLL_SECONDS = 5
+MIN_SENSOR_INTERVAL_SECONDS = 3.0
+MAX_SENSOR_INTERVAL_SECONDS = 120.0
+
+
+def _safe_interval_seconds(value, default):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        logger.warning(f"[CONFIG] Invalid sensor interval '{value}', using default {default}s")
+        return float(default)
+
+    clamped = max(MIN_SENSOR_INTERVAL_SECONDS, min(MAX_SENSOR_INTERVAL_SECONDS, parsed))
+    if clamped != parsed:
+        logger.warning(
+            f"[CONFIG] Sensor interval {parsed}s out of range; clamped to {clamped}s "
+            f"(allowed {MIN_SENSOR_INTERVAL_SECONDS}-{MAX_SENSOR_INTERVAL_SECONDS}s)"
+        )
+    return clamped
 
 # Configurable sensor interval (can be updated via API)
-SENSOR_INTERVAL_CONFIG = float(os.getenv("SENSOR_INTERVAL_SECONDS", "10"))
+interval_from_env = os.getenv(
+    "SENSOR_INTERVAL_SECONDS",
+    os.getenv("SENSOR_POLL_INTERVAL", str(SENSOR_INTERVAL_SECONDS)),
+)
+SENSOR_INTERVAL_CONFIG = _safe_interval_seconds(interval_from_env, SENSOR_INTERVAL_SECONDS)
 last_sensor_config_fetch = 0
 CONFIG_FETCH_INTERVAL = 300  # Refresh config every 5 minutes
 
@@ -355,8 +377,9 @@ def fetch_sensor_config():
         if r.status_code == 200:
             config = r.json()
             logger.debug(f"[CONFIG] Received: {config}")
-            new_interval = config.get("sampling_interval_seconds", SENSOR_INTERVAL_CONFIG)
-            if new_interval != SENSOR_INTERVAL_CONFIG:
+            new_interval_raw = config.get("sampling_interval_seconds", SENSOR_INTERVAL_CONFIG)
+            new_interval = _safe_interval_seconds(new_interval_raw, SENSOR_INTERVAL_CONFIG)
+            if abs(new_interval - SENSOR_INTERVAL_CONFIG) > 1e-6:
                 logger.info(f"[CONFIG UPDATE] ✓ Sensor interval updated: {SENSOR_INTERVAL_CONFIG}s → {new_interval}s")
                 SENSOR_INTERVAL_CONFIG = new_interval
             else:
