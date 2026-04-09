@@ -90,13 +90,15 @@ interval_from_env = os.getenv(
     os.getenv("SENSOR_POLL_INTERVAL", str(SENSOR_INTERVAL_SECONDS)),
 )
 SENSOR_INTERVAL_CONFIG = _safe_interval_seconds(interval_from_env, SENSOR_INTERVAL_SECONDS)
+SENSOR_COLLECTION_ENABLED = os.getenv("SENSOR_COLLECTION_ENABLED", "1") == "1"
 last_sensor_config_fetch = 0
-CONFIG_FETCH_INTERVAL = 300  # Refresh config every 5 minutes
+CONFIG_FETCH_INTERVAL = max(3.0, float(os.getenv("SENSOR_CONFIG_FETCH_INTERVAL_SECONDS", "15")))
 
 ESP_SEND_INTERVAL = 5  # 🔥 send every 4 sec
 LOCAL_ESP_QUEUE_ENABLED = os.getenv("LOCAL_ESP_QUEUE_ENABLED", "0") == "1"
 
 logger.info(f"CONFIG: SENSOR_INTERVAL = {SENSOR_INTERVAL_CONFIG}s")
+logger.info(f"CONFIG: SENSOR_COLLECTION_ENABLED = {SENSOR_COLLECTION_ENABLED}")
 logger.info(f"CONFIG: HEARTBEAT_INTERVAL = {HEARTBEAT_INTERVAL_SECONDS}s")
 logger.info(f"CONFIG: COMMAND_POLL_INTERVAL = {COMMAND_POLL_SECONDS}s")
 logger.info(f"CONFIG: CONFIG_FETCH_INTERVAL = {CONFIG_FETCH_INTERVAL}s")
@@ -364,7 +366,7 @@ def post_sensor_data():
 
 def fetch_sensor_config():
     """Fetch configurable sensor interval from backend"""
-    global SENSOR_INTERVAL_CONFIG, last_sensor_config_fetch
+    global SENSOR_INTERVAL_CONFIG, SENSOR_COLLECTION_ENABLED, last_sensor_config_fetch
     
     api_url = f"{API_BASE}/sensor-config/{NODE_ID}"
     logger.debug(f"[CONFIG FETCH] GET {api_url}")
@@ -379,11 +381,19 @@ def fetch_sensor_config():
             logger.debug(f"[CONFIG] Received: {config}")
             new_interval_raw = config.get("sampling_interval_seconds", SENSOR_INTERVAL_CONFIG)
             new_interval = _safe_interval_seconds(new_interval_raw, SENSOR_INTERVAL_CONFIG)
+            new_enabled = bool(config.get("enabled", SENSOR_COLLECTION_ENABLED))
             if abs(new_interval - SENSOR_INTERVAL_CONFIG) > 1e-6:
                 logger.info(f"[CONFIG UPDATE] ✓ Sensor interval updated: {SENSOR_INTERVAL_CONFIG}s → {new_interval}s")
                 SENSOR_INTERVAL_CONFIG = new_interval
             else:
                 logger.debug(f"[CONFIG] No change needed. Current: {SENSOR_INTERVAL_CONFIG}s")
+
+            if new_enabled != SENSOR_COLLECTION_ENABLED:
+                logger.info(f"[CONFIG UPDATE] ✓ Sensor collection enabled: {SENSOR_COLLECTION_ENABLED} → {new_enabled}")
+                SENSOR_COLLECTION_ENABLED = new_enabled
+            else:
+                logger.debug(f"[CONFIG] Sensor collection unchanged: {SENSOR_COLLECTION_ENABLED}")
+
             last_sensor_config_fetch = time.time()
             return True
         else:
@@ -505,7 +515,7 @@ def poll_commands():
 
 # ================= MAIN =================
 def main():
-    global last_esp_send, SENSOR_INTERVAL_CONFIG, last_sensor_config_fetch
+    global last_esp_send, SENSOR_INTERVAL_CONFIG, SENSOR_COLLECTION_ENABLED, last_sensor_config_fetch
 
     logger.info("="*80)
     logger.info("[MAIN] Agent started - entering main loop")
@@ -565,7 +575,10 @@ def main():
             # SENSOR - Use configurable interval
             if now >= next_sensor:
                 logger.info(f"[TIMER] Sensor interval reached ({SENSOR_INTERVAL_CONFIG}s)")
-                post_sensor_data()
+                if SENSOR_COLLECTION_ENABLED:
+                    post_sensor_data()
+                else:
+                    logger.info("[SENSOR] Collection disabled by backend config; skipping sensor POST")
                 next_sensor = now + SENSOR_INTERVAL_CONFIG
 
             # HEARTBEAT
