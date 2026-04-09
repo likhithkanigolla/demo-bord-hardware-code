@@ -14,7 +14,7 @@ Port: 8001 (internal to Pi network)
 from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Set
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 import time
@@ -257,6 +257,31 @@ def _send_results_to_backend(execution_id: str, experiment_type: str, results: d
         msg = f"❌ Error sending results to backend: {e}"
         logger.error(f"[{execution_id}] {msg}", exc_info=True)
 
+
+def _coerce_float(value: Any, default: float) -> float:
+    """Convert arbitrary values to float with safe fallback."""
+    try:
+        if value is None:
+            return float(default)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    """Convert arbitrary values to int with safe fallback."""
+    try:
+        if value is None:
+            return int(default)
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _utc_now_iso() -> str:
+    """Return UTC ISO-8601 timestamp with trailing Z."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
 def _run_e1_experiment(execution_id: str, state: ExperimentState, req: ExperimentRequest):
     """Run E1 experiment and update state"""
     try:
@@ -264,8 +289,8 @@ def _run_e1_experiment(execution_id: str, state: ExperimentState, req: Experimen
         logger.info(f"[{execution_id}] Starting E1 with {req.trials} trials")
 
         cfg = req.experiment_config or {}
-        sample_interval_seconds = max(6.0, min(14.0, float(cfg.get("sample_interval_seconds", 10.0))))
-        risk_threshold = max(0.35, min(0.90, float(cfg.get("risk_threshold", 0.62))))
+        sample_interval_seconds = max(6.0, min(14.0, _coerce_float(cfg.get("sample_interval_seconds", 10.0), 10.0)))
+        risk_threshold = max(0.35, min(0.90, _coerce_float(cfg.get("risk_threshold", 0.62), 0.62)))
         
         # Use refactored hybrid architecture
         runner = create_experiment_runner(
@@ -306,17 +331,17 @@ def _run_e2_experiment(execution_id: str, state: ExperimentState, req: Experimen
         logger.info(f"[{execution_id}] Starting E2 with {req.trials} trials")
 
         cfg = req.experiment_config or {}
-        ambient_min = float(cfg.get("ambient_min", 22.0))
-        ambient_max = float(cfg.get("ambient_max", 35.0))
+        ambient_min = _coerce_float(cfg.get("ambient_min", 22.0), 22.0)
+        ambient_max = _coerce_float(cfg.get("ambient_max", 35.0), 35.0)
         if ambient_max < ambient_min:
             ambient_min, ambient_max = ambient_max, ambient_min
 
-        delayed_sync_trials = int(cfg.get("delayed_sync_trials", min(5, max(0, req.trials))))
+        delayed_sync_trials = _coerce_int(cfg.get("delayed_sync_trials", min(5, max(0, req.trials))), min(5, max(0, req.trials)))
         delayed_sync_trials = min(max(delayed_sync_trials, 0), req.trials)
-        delayed_sync_seconds = max(0, int(cfg.get("delayed_sync_seconds", 45)))
-        default_fan_speed = max(0.0, min(1.0, float(cfg.get("default_fan_speed", 0.8))))
-        action_duration_seconds = max(5, int(cfg.get("action_duration_seconds", 20)))
-        acceptable_error_c = max(0.1, float(cfg.get("acceptable_error_c", 2.5)))
+        delayed_sync_seconds = max(0, _coerce_int(cfg.get("delayed_sync_seconds", 45), 45))
+        default_fan_speed = max(0.0, min(1.0, _coerce_float(cfg.get("default_fan_speed", 0.8), 0.8)))
+        action_duration_seconds = max(5, _coerce_int(cfg.get("action_duration_seconds", 20), 20))
+        acceptable_error_c = max(0.1, _coerce_float(cfg.get("acceptable_error_c", 2.5), 2.5))
         
         # Use refactored hybrid architecture
         runner = create_experiment_runner(
@@ -356,8 +381,8 @@ def _run_e3_experiment(execution_id: str, state: ExperimentState, req: Experimen
     """Run E3 experiment and update state"""
     try:
         cfg = req.experiment_config or {}
-        stable_error_threshold = max(0.1, float(cfg.get("stable_error_threshold", 1.5)))
-        sessions = int(cfg.get("sessions", 0))
+        stable_error_threshold = max(0.1, _coerce_float(cfg.get("stable_error_threshold", 1.5), 1.5))
+        sessions = max(0, _coerce_int(cfg.get("sessions", 0), 0))
 
         if sessions > 0:
             state.trials_total = sessions * 3
@@ -408,8 +433,8 @@ def _run_e4_experiment(execution_id: str, state: ExperimentState, req: Experimen
         logger.info(f"[{execution_id}] Starting E4 with {req.trials} trials")
 
         cfg = req.experiment_config or {}
-        proactive_start_trial = max(2, int(cfg.get("proactive_start_trial", 11)))
-        reactive_fault_delta_c = max(1.0, float(cfg.get("reactive_fault_delta_c", 6.0)))
+        proactive_start_trial = max(2, _coerce_int(cfg.get("proactive_start_trial", 11), 11))
+        reactive_fault_delta_c = max(1.0, _coerce_float(cfg.get("reactive_fault_delta_c", 6.0), 6.0))
         
         # Use refactored hybrid architecture
         runner = create_experiment_runner(
@@ -447,8 +472,8 @@ def _run_e5_experiment(execution_id: str, state: ExperimentState, req: Experimen
         logger.info(f"[{execution_id}] Starting E5 with {req.trials} trials")
 
         cfg = req.experiment_config or {}
-        effectiveness_threshold = max(0.1, min(1.0, float(cfg.get("effectiveness_threshold", 0.8))))
-        cost_scale = max(0.1, min(5.0, float(cfg.get("cost_scale", 1.0))))
+        effectiveness_threshold = max(0.1, min(1.0, _coerce_float(cfg.get("effectiveness_threshold", 0.8), 0.8)))
+        cost_scale = max(0.1, min(5.0, _coerce_float(cfg.get("cost_scale", 1.0), 1.0)))
         
         # Use refactored hybrid architecture
         runner = create_experiment_runner(
@@ -503,7 +528,7 @@ def integrated_sensor_feed(request: IntegratedSensorFeedRequest):
             "node_id": request.node_id,
             "sensor_type": request.sensor_type,
             "readings": request.readings,
-            "timestamp": request.timestamp or datetime.utcnow().isoformat() + "Z",
+            "timestamp": request.timestamp or _utc_now_iso(),
             "metadata": {
                 **(request.metadata or {}),
                 "source": "pi_integrated_sensor_feed",
