@@ -1,0 +1,12 @@
+{
+  "execution_id": "ExperimentType.E1_1774993365_be412ca0",
+  "experiment_type": "E1",
+  "node_id": 1,
+  "timestamp": "2026-04-01T03:12:45.242396",
+  "trials": [],
+  "summary": {
+    "total_duration_seconds": 0.118212,
+    "trials_completed": 0,
+    "success_rate": 0.0
+  }
+}
